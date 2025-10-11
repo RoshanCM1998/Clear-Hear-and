@@ -17,6 +17,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var gainInput: EditText
     private lateinit var volumeInput: EditText
     private lateinit var startStopButton: Button
+    private lateinit var modeGroup: RadioGroup
 
     private var isRunning: Boolean = false
 
@@ -48,6 +49,32 @@ class MainActivity : AppCompatActivity() {
             filters = arrayOf(InputFilter.LengthFilter(4))
         }
 
+        val modeLabel = TextView(this).apply { text = "Noise Reduction Mode" }
+        modeGroup = RadioGroup(this).apply {
+            orientation = RadioGroup.HORIZONTAL
+            val off = RadioButton(this@MainActivity).apply { text = "Off"; id = View.generateViewId() }
+            val light = RadioButton(this@MainActivity).apply { text = "Light"; id = View.generateViewId() }
+            val extreme = RadioButton(this@MainActivity).apply { text = "Extreme"; id = View.generateViewId() }
+            addView(off)
+            addView(light)
+            addView(extreme)
+            check(light.id)
+            setOnCheckedChangeListener { _, checkedId ->
+                if (!isRunning) return@setOnCheckedChangeListener
+                val mode = when (checkedId) {
+                    off.id -> "OFF"
+                    light.id -> "LIGHT"
+                    extreme.id -> "EXTREME"
+                    else -> "LIGHT"
+                }
+                val intent = Intent(this@MainActivity, AudioForegroundService::class.java).apply {
+                    action = AudioForegroundService.ACTION_SET_MODE
+                    putExtra(AudioForegroundService.EXTRA_MODE, mode)
+                }
+                startService(intent)
+            }
+        }
+
         startStopButton = Button(this).apply {
             text = "Start"
             setOnClickListener { onStartStopClicked() }
@@ -57,6 +84,8 @@ class MainActivity : AppCompatActivity() {
         rootLayout.addView(gainInput)
         rootLayout.addView(volLabel)
         rootLayout.addView(volumeInput)
+        rootLayout.addView(modeLabel)
+        rootLayout.addView(modeGroup)
         rootLayout.addView(startStopButton)
 
         setContentView(rootLayout)
@@ -70,10 +99,22 @@ class MainActivity : AppCompatActivity() {
             }
             val gainValue = gainInput.text.toString().ifBlank { "100" }.toInt()
             val volValue = volumeInput.text.toString().ifBlank { "100" }.toInt()
+            val selectedMode = when (modeGroup.checkedRadioButtonId) {
+                -1 -> "LIGHT"
+                else -> {
+                    val btn = findViewById<RadioButton>(modeGroup.checkedRadioButtonId)
+                    when (btn.text.toString()) {
+                        "Off" -> "OFF"
+                        "Extreme" -> "EXTREME"
+                        else -> "LIGHT"
+                    }
+                }
+            }
             val service = Intent(this, AudioForegroundService::class.java).apply {
                 action = AudioForegroundService.ACTION_START
                 putExtra(AudioForegroundService.EXTRA_GAIN_100X, gainValue)
                 putExtra(AudioForegroundService.EXTRA_VOL_100X, volValue)
+                putExtra(AudioForegroundService.EXTRA_MODE, selectedMode)
             }
             ContextCompat.startForegroundService(this, service)
             isRunning = true

@@ -48,3 +48,31 @@
     - Reason: Build error requires android.useAndroidX=true; Jetifier for legacy transitive deps
     - Behavior change: None, build system flags only
 
+13. Add AudioProcessor with 16kHz mic-to-speaker pipeline and NoiseMode
+    - Reason: Encapsulate audio logic and mode switching for noise reduction
+    - Behavior change: Audio processing moved from service into processor class
+
+14. Implement LIGHT mode using NoiseSuppressor/AGC/AEC bound to AudioRecord
+    - Reason: Built-in effects for mild, natural noise cleanup
+    - Behavior change: Enables supported effects dynamically; no effect if unsupported
+
+15. Integrate RNNoise JNI wrapper and CMake with graceful stub fallback
+    - Reason: Extreme AI-based noise reduction on-device via NDK
+    - Behavior change: New native library load at runtime; fallback to passthrough if unavailable
+
+16. Wire AudioForegroundService to use AudioProcessor and support ACTION_SET_MODE
+    - Reason: Runtime mode switching from UI without restarting service
+    - Behavior change: Service delegates processing and can change modes on the fly
+
+17. Add SegmentedButton UI in MainActivity to switch modes (default LIGHT)
+    - Reason: User control for Off/Light/Extreme
+    - Behavior change: Selecting a mode updates processing immediately
+
+18. Update Gradle for externalNativeBuild and ABI filters
+    - Reason: Build native rnnoise .so with CMake for supported ABIs
+    - Behavior change: NDK/CMake configs added; app size may change per ABI splits
+
+19. Ensure resource cleanup and error handling across modes
+    - Reason: Prevent leaks, handle unsupported effects/devices and missing natives
+    - Behavior change: Effects and native handles are created/released on mode switch and stop
+
