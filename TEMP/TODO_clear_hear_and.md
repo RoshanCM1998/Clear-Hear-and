@@ -40,3 +40,11 @@
     - Reason: Keep code clean and requirements satisfied
     - Behavior change: None (cleanup)
 
+11. Fix build: add android:exported to launcher activity
+    - Reason: Required on Android 12+ for activities with intent-filters
+    - Behavior change: None (manifest metadata only)
+
+12. Enable AndroidX and Jetifier in gradle.properties
+    - Reason: Build error requires android.useAndroidX=true; Jetifier for legacy transitive deps
+    - Behavior change: None, build system flags only
+
