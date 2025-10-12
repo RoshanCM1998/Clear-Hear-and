@@ -105,14 +105,27 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { exportLogsToday() }
         }
 
+        // Add components with 16dp bottom margins for better spacing
+        val marginDp = (16 * resources.displayMetrics.density).toInt()
+        
+        fun View.withMarginBottom(): View {
+            val params = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            params.setMargins(0, 0, 0, marginDp)
+            this.layoutParams = params
+            return this
+        }
+        
         rootLayout.addView(gainLabel)
-        rootLayout.addView(gainInput)
+        rootLayout.addView(gainInput.withMarginBottom())
         rootLayout.addView(volLabel)
-        rootLayout.addView(volumeInput)
-        rootLayout.addView(applyParamsButton)
+        rootLayout.addView(volumeInput.withMarginBottom())
+        rootLayout.addView(applyParamsButton.withMarginBottom())
         rootLayout.addView(modeLabel)
-        rootLayout.addView(modeGroup)
-        rootLayout.addView(startStopButton)
+        rootLayout.addView(modeGroup.withMarginBottom())
+        rootLayout.addView(startStopButton.withMarginBottom())
         rootLayout.addView(exportButton)
 
         setContentView(rootLayout)
