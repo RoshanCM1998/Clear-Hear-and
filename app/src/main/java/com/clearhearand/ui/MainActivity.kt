@@ -32,6 +32,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var modeGroup: RadioGroup
     private lateinit var applyParamsButton: Button
     private lateinit var exportButton: Button
+    private lateinit var clearLogsButton: Button
 
     private var isRunning: Boolean = false
 
@@ -105,6 +106,11 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { exportLogsToday() }
         }
 
+        clearLogsButton = Button(this).apply {
+            text = "Clear Logs"
+            setOnClickListener { clearLogsToday() }
+        }
+
         // Add components with 16dp bottom margins for better spacing
         val marginDp = (16 * resources.displayMetrics.density).toInt()
         
@@ -126,7 +132,8 @@ class MainActivity : AppCompatActivity() {
         rootLayout.addView(modeLabel)
         rootLayout.addView(modeGroup.withMarginBottom())
         rootLayout.addView(startStopButton.withMarginBottom())
-        rootLayout.addView(exportButton)
+        rootLayout.addView(exportButton.withMarginBottom())
+        rootLayout.addView(clearLogsButton)
 
         setContentView(rootLayout)
     }
@@ -182,6 +189,33 @@ class MainActivity : AppCompatActivity() {
         }
         startService(intent)
         Toast.makeText(this, "Updated: Gain=$gainValue%, Vol=$volValue%", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun clearLogsToday() {
+        val srcDir = File(getExternalFilesDir(null), "logs")
+        if (!srcDir.exists()) {
+            Toast.makeText(this, "No logs directory found", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val today = SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())
+        val file = File(srcDir, "hearing_log_${today}.txt")
+        if (!file.exists()) {
+            Toast.makeText(this, "No log for today", Toast.LENGTH_SHORT).show()
+            return
+        }
+        try {
+            // Read the first line (header)
+            val headerLine = file.bufferedReader().use { reader ->
+                reader.readLine()
+            }
+            
+            // Clear file and write back only the header
+            file.writeText(headerLine + "\n")
+            
+            Toast.makeText(this, "Cleared today's log (kept header)", Toast.LENGTH_SHORT).show()
+        } catch (e: Throwable) {
+            Toast.makeText(this, "Clear failed: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun exportLogsToday() {
