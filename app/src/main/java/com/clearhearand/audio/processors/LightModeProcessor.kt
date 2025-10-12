@@ -5,6 +5,7 @@ import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
 import android.util.Log
+import com.clearhearand.audio.dsp.SpectralNoiseGate
 
 /**
  * LIGHT Mode Processor - Android Built-in Effects Implementation
@@ -57,6 +58,9 @@ class LightModeProcessor : IAudioModeProcessor {
     private var automaticGainControl: AutomaticGainControl? = null
     private var acousticEchoCanceler: AcousticEchoCanceler? = null
     
+    // Software-based spectral noise gate (for devices without hardware effects)
+    private var noiseGate: SpectralNoiseGate? = null
+    
     /**
      * Process audio with Android effects and user controls.
      * 
@@ -64,10 +68,16 @@ class LightModeProcessor : IAudioModeProcessor {
      * so we just apply the user's gain and volume.
      */
     override fun process(inChunk: ShortArray, outChunk: ShortArray, gain: Float, volume: Float) {
+        // Copy input to output
+        System.arraycopy(inChunk, 0, outChunk, 0, inChunk.size)
+        
         // Android effects are applied automatically at AudioRecord level
-        // We just apply user's gain and volume
-        for (i in inChunk.indices) {
-            val sample = inChunk[i].toInt()
+        // Apply additional software noise gate for better noise reduction
+        noiseGate?.process(outChunk)
+        
+        // Apply user's gain and volume
+        for (i in outChunk.indices) {
+            val sample = outChunk[i].toInt()
             var v = (sample * gain * volume)
             
             // Clamp to prevent overflow
@@ -81,14 +91,15 @@ class LightModeProcessor : IAudioModeProcessor {
     /**
      * Returns description showing which Android effects are active.
      * 
-     * Example: "LIGHT-Android[NS,AGC,AEC]" means all three effects are enabled.
+     * Example: "LIGHT-Android[NS,AGC,AEC]+SpectralGate" means all effects are enabled.
      */
     override fun getDescription(): String {
         val effects = mutableListOf<String>()
         if (noiseSuppressor?.enabled == true) effects.add("NS")
         if (automaticGainControl?.enabled == true) effects.add("AGC")
         if (acousticEchoCanceler?.enabled == true) effects.add("AEC")
-        return "LIGHT-Android[${effects.joinToString(",")}]"
+        val androidEffects = if (effects.isNotEmpty()) "Android[${effects.joinToString(",")}]" else "Android[none]"
+        return "LIGHT-$androidEffects+SpectralGate"
     }
     
     /**
@@ -142,6 +153,18 @@ class LightModeProcessor : IAudioModeProcessor {
             Log.w(tag, "AcousticEchoCanceler setup failed: ${e.message}")
         }
         
+        // Initialize software spectral noise gate
+        try {
+            noiseGate = SpectralNoiseGate(
+                sampleRate = sampleRate,
+                noiseThresholdDb = -50f,  // Gentle threshold
+                reductionDb = -20f         // Reduce noise by 20dB
+            )
+            Log.d(tag, "SpectralNoiseGate initialized")
+        } catch (e: Exception) {
+            Log.w(tag, "SpectralNoiseGate setup failed: ${e.message}")
+        }
+        
         Log.d(tag, "LIGHT mode setup complete: ${getDescription()}")
     }
     
@@ -180,6 +203,15 @@ class LightModeProcessor : IAudioModeProcessor {
             Log.d(tag, "AcousticEchoCanceler released")
         } catch (e: Exception) {
             Log.w(tag, "AcousticEchoCanceler cleanup failed: ${e.message}")
+        }
+        
+        // Cleanup noise gate
+        try {
+            noiseGate?.reset()
+            noiseGate = null
+            Log.d(tag, "SpectralNoiseGate released")
+        } catch (e: Exception) {
+            Log.w(tag, "SpectralNoiseGate cleanup failed: ${e.message}")
         }
         
         Log.d(tag, "LIGHT mode cleanup complete")

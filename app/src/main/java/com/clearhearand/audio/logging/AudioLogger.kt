@@ -39,7 +39,7 @@ class AudioLogger(context: Context) {
         flags: String
     ) {
         val n = frameCounter.incrementAndGet()
-        if (n % 200 != 0) return // Log roughly every 1s at 48kHz/100ms = 10 frames/sec
+        if (n % 10 != 0) return // Log every 1s at 48kHz/100ms = 10 frames/sec
         
         // Human-readable timestamp: YYYY-MM-DD HH:mm:ss
         val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())

@@ -255,3 +255,34 @@
       * Easy to test (each layer can be tested independently)
     - Result: Enterprise-grade architecture, Angular + C# style, ready for production
     - Build status: ✅ BUILD SUCCESSFUL in 8s
+
+26. Fix 16KB page size compatibility for Google Play
+    - Reason: Google Play requirement for Android 15+ apps (mandatory from November 1, 2025)
+    - Problem: Native library librnnoise.so had LOAD segments not aligned at 16KB boundaries
+    - Warning: "APK is not compatible with 16 KB devices"
+    - Solution: Add linker flag for 16KB page alignment in CMake
+    - Changes made:
+      * Updated app/src/main/cpp/CMakeLists.txt
+      * Added target_link_options with -Wl,-z,max-page-size=16384
+      * This ensures all LOAD segments aligned at 16KB boundaries
+      * Applied to all architectures:
+        - arm64-v8a (64-bit ARM)
+        - armeabi-v7a (32-bit ARM)
+        - x86_64 (64-bit x86)
+      * Clean build required to apply changes
+      * Ran ./gradlew clean
+      * Ran ./gradlew assembleDebug
+    - Benefits:
+      * Google Play compliant (November 2025 requirement)
+      * Better performance on Android 15+ devices
+      * Fully backward compatible with older devices
+      * No warnings from Google Play
+      * Future-proof for modern devices
+    - Technical details:
+      * 16KB = 16384 bytes page size
+      * Improves memory efficiency on modern devices
+      * Slight size increase due to padding (50KB → 50-64KB)
+      * Mandatory for all apps targeting Android 15+ (API 35+)
+    - Result: Fully compliant with Google Play 16KB requirement
+    - Build status: ✅ BUILD SUCCESSFUL in 22s
+    - Reference: https://developer.android.com/16kb-page-size
