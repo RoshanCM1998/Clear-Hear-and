@@ -15,6 +15,13 @@ add_library(
 
 find_library(log-lib log)
 
+# Fix for 16KB page size compatibility (Google Play requirement for Android 15+)
+# This ensures LOAD segments are aligned at 16KB boundaries
+target_link_options(
+        rnnoise
+        PRIVATE
+        -Wl,-z,max-page-size=16384)
+
 target_link_libraries(
         rnnoise
         ${log-lib})

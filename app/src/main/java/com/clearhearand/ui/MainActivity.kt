@@ -1,10 +1,14 @@
-package com.clearhearand
+package com.clearhearand.ui
 
 import android.Manifest
+import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.MediaStore
 import android.text.InputFilter
 import android.text.InputType
 import android.view.View
@@ -12,12 +16,22 @@ import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import com.clearhearand.R
+import com.clearhearand.audio.NoiseMode
+import com.clearhearand.services.AudioForegroundService
+import java.io.File
+import java.io.FileInputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
     private lateinit var gainInput: EditText
     private lateinit var volumeInput: EditText
     private lateinit var startStopButton: Button
     private lateinit var modeGroup: RadioGroup
+    private lateinit var applyParamsButton: Button
+    private lateinit var exportButton: Button
 
     private var isRunning: Boolean = false
 
@@ -35,14 +49,14 @@ class MainActivity : AppCompatActivity() {
             setPadding(48, 48, 48, 48)
         }
 
-        val gainLabel = TextView(this).apply { text = "Gain" }
+        val gainLabel = TextView(this).apply { text = "Gain (e.g., 100, 125, 325)" }
         gainInput = EditText(this).apply {
             hint = "100"
             inputType = InputType.TYPE_CLASS_NUMBER
             filters = arrayOf(InputFilter.LengthFilter(4))
         }
 
-        val volLabel = TextView(this).apply { text = "Master Volume" }
+        val volLabel = TextView(this).apply { text = "Master Volume (e.g., 100, 125, 325)" }
         volumeInput = EditText(this).apply {
             hint = "100"
             inputType = InputType.TYPE_CLASS_NUMBER
@@ -75,18 +89,31 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        applyParamsButton = Button(this).apply {
+            text = "Apply Gain/Volume"
+            isEnabled = false
+            setOnClickListener { onApplyParamsClicked() }
+        }
+
         startStopButton = Button(this).apply {
             text = "Start"
             setOnClickListener { onStartStopClicked() }
+        }
+
+        exportButton = Button(this).apply {
+            text = "Export Logs"
+            setOnClickListener { exportLogsToday() }
         }
 
         rootLayout.addView(gainLabel)
         rootLayout.addView(gainInput)
         rootLayout.addView(volLabel)
         rootLayout.addView(volumeInput)
+        rootLayout.addView(applyParamsButton)
         rootLayout.addView(modeLabel)
         rootLayout.addView(modeGroup)
         rootLayout.addView(startStopButton)
+        rootLayout.addView(exportButton)
 
         setContentView(rootLayout)
     }
@@ -119,6 +146,7 @@ class MainActivity : AppCompatActivity() {
             ContextCompat.startForegroundService(this, service)
             isRunning = true
             startStopButton.text = "Stop"
+            applyParamsButton.isEnabled = true
         } else {
             val service = Intent(this, AudioForegroundService::class.java).apply {
                 action = AudioForegroundService.ACTION_STOP
@@ -126,6 +154,58 @@ class MainActivity : AppCompatActivity() {
             startService(service)
             isRunning = false
             startStopButton.text = "Start"
+            applyParamsButton.isEnabled = false
+        }
+    }
+
+    private fun onApplyParamsClicked() {
+        if (!isRunning) return
+        val gainValue = gainInput.text.toString().ifBlank { "100" }.toIntOrNull() ?: 100
+        val volValue = volumeInput.text.toString().ifBlank { "100" }.toIntOrNull() ?: 100
+        val intent = Intent(this, AudioForegroundService::class.java).apply {
+            action = AudioForegroundService.ACTION_SET_PARAMS
+            putExtra(AudioForegroundService.EXTRA_GAIN_100X, gainValue)
+            putExtra(AudioForegroundService.EXTRA_VOL_100X, volValue)
+        }
+        startService(intent)
+        Toast.makeText(this, "Updated: Gain=$gainValue%, Vol=$volValue%", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun exportLogsToday() {
+        val srcDir = File(getExternalFilesDir(null), "logs")
+        if (!srcDir.exists()) {
+            Toast.makeText(this, "No logs directory found", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val today = SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())
+        val file = File(srcDir, "hearing_log_${today}.txt")
+        if (!file.exists()) {
+            Toast.makeText(this, "No log for today", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val resolver = contentResolver
+        val destDirName = "HearingAidLogs"
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, file.name)
+                    put(MediaStore.Downloads.MIME_TYPE, "text/plain")
+                    put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/$destDirName")
+                }
+                val uri: Uri? = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                if (uri != null) {
+                    resolver.openOutputStream(uri)?.use { out ->
+                        FileInputStream(file).use { it.copyTo(out) }
+                    }
+                }
+            } else {
+                val dest = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "$destDirName/${file.name}")
+                dest.parentFile?.mkdirs()
+                dest.outputStream().use { out -> FileInputStream(file).use { it.copyTo(out) } }
+            }
+            Toast.makeText(this, "Exported today's log to Downloads/$destDirName", Toast.LENGTH_SHORT).show()
+        } catch (e: Throwable) {
+            Toast.makeText(this, "Export failed: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
 

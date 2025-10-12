@@ -2,19 +2,35 @@ package com.clearhearand.audio
 
 import android.content.Context
 import android.media.*
-import android.media.audiofx.AcousticEchoCanceler
-import android.media.audiofx.AutomaticGainControl
-import android.media.audiofx.NoiseSuppressor
-import android.os.Build
 import android.util.Log
+import com.clearhearand.audio.logging.AudioLogger
+import com.clearhearand.audio.processors.IAudioModeProcessor
+import com.clearhearand.audio.processors.ExtremeModeProcessor
+import com.clearhearand.audio.processors.LightModeProcessor
+import com.clearhearand.audio.processors.OffModeProcessor
 import com.example.audio.RNNoise
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
 import kotlin.math.max
-import kotlin.math.min
+import kotlin.math.sqrt
 
-enum class NoiseMode { OFF, LIGHT, EXTREME }
+/**
+ * Noise cancellation modes available to the user.
+ * 
+ * Each mode has a corresponding processor implementation in the processors package.
+ */
+enum class NoiseMode {
+    /** No noise cancellation - pure passthrough */
+    OFF,
+    
+    /** Mild noise reduction using Android built-in effects */
+    LIGHT,
+    
+    /** Strong noise reduction for very noisy environments */
+    EXTREME
+}
 
 class AudioProcessor(private val context: Context) {
     private val tag = "AudioProcessor"
@@ -27,31 +43,38 @@ class AudioProcessor(private val context: Context) {
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
 
-    private var ns: NoiseSuppressor? = null
-    private var agc: AutomaticGainControl? = null
-    private var aec: AcousticEchoCanceler? = null
-
     @Volatile private var noiseMode: NoiseMode = NoiseMode.LIGHT
 
     @Volatile private var gainMultiplier: Float = 1.0f
     @Volatile private var volumeMultiplier: Float = 1.0f
 
-    // RNNoise
+    // RNNoise handle (for future use in EXTREME mode if needed)
     private var rnHandle: Long = 0L
-    private var rnAvailable: Boolean = false
 
-    // Audio format
+    // Audio format - KEEP at 48kHz and 100ms for original quality
     private val sampleRate = 48000  // Restored to match old code for better quality or 16000
     private val channelIn = AudioFormat.CHANNEL_IN_MONO
     private val channelOut = AudioFormat.CHANNEL_OUT_MONO
     private val encoding = AudioFormat.ENCODING_PCM_16BIT
+
+    // Strategy pattern: Different processor for each mode
+    private var currentProcessor: IAudioModeProcessor = OffModeProcessor()
+    
+    private var logger: AudioLogger? = null
 
     fun start(initialMode: NoiseMode = NoiseMode.LIGHT, gain100x: Int = 100, volume100x: Int = 100) {
         if (isRunning.getAndSet(true)) return
         noiseMode = initialMode
         gainMultiplier = gain100x / 100.0f
         volumeMultiplier = volume100x / 100.0f
+
+        logger = AudioLogger(context)
+
         setupAudio()
+        
+        // Create processor for initial mode
+        createProcessorForMode(initialMode)
+        
         startThreads()
     }
 
@@ -59,7 +82,7 @@ class AudioProcessor(private val context: Context) {
         if (!isRunning.getAndSet(false)) return
         try { audioRecord?.stop() } catch (_: Throwable) {}
         try { audioTrack?.stop() } catch (_: Throwable) {}
-        releaseEffects()
+        currentProcessor.cleanup()
         audioRecord?.release(); audioRecord = null
         audioTrack?.release(); audioTrack = null
         queue.clear()
@@ -67,31 +90,52 @@ class AudioProcessor(private val context: Context) {
             try { RNNoise.release(rnHandle) } catch (_: Throwable) {}
             rnHandle = 0L
         }
+        logger?.close(); logger = null
     }
 
     fun setNoiseMode(mode: NoiseMode) {
+        val oldMode = noiseMode
         noiseMode = mode
         if (!isRunning.get()) return
-        // Reconfigure effects / RNNoise on-the-fly
-        when (mode) {
+
+        // Strategy pattern: Switch to different processor
+        Log.d(tag, "Switching from $oldMode to $mode")
+        createProcessorForMode(mode)
+    }
+    
+    /**
+     * Create and setup processor for the specified mode
+     * Cleans up old processor first
+     */
+    private fun createProcessorForMode(mode: NoiseMode) {
+        // Cleanup old processor
+        currentProcessor.cleanup()
+        
+        // Create new processor based on mode
+        currentProcessor = when (mode) {
             NoiseMode.OFF -> {
-                disableEffects()
-                teardownRn()
+                Log.d(tag, "Created OffModeProcessor")
+                OffModeProcessor()
             }
             NoiseMode.LIGHT -> {
-                enableEffectsIfSupported()
-                teardownRn()
+                Log.d(tag, "Created LightModeProcessor")
+                LightModeProcessor()
             }
             NoiseMode.EXTREME -> {
-                disableEffects()
-                setupRn()
+                Log.d(tag, "Created ExtremeModeProcessor")
+                ExtremeModeProcessor()
             }
         }
+        
+        // Setup new processor
+        currentProcessor.setup(audioRecord, sampleRate)
+        Log.d(tag, "Active processor: ${currentProcessor.getDescription()}")
     }
 
     fun setGainAndVolume(gain100x: Int, volume100x: Int) {
         gainMultiplier = gain100x / 100.0f
         volumeMultiplier = volume100x / 100.0f
+        Log.d(tag, "Updated gain=$gainMultiplier, volume=$volumeMultiplier")
     }
 
     private fun setupAudio() {
@@ -133,14 +177,9 @@ class AudioProcessor(private val context: Context) {
             .setBufferSizeInBytes(playBufferSize)
             .build()
 
-        when (noiseMode) {
-            NoiseMode.LIGHT -> enableEffectsIfSupported()
-            NoiseMode.EXTREME -> setupRn()
-            else -> {}
-        }
-
         audioTrack?.play()
     }
+
 
     private fun startThreads() {
         val rec = audioRecord ?: return
@@ -171,61 +210,33 @@ class AudioProcessor(private val context: Context) {
                 while (isRunning.get()) {
                     val inChunk = queue.take()
                     val n = inChunk.size
-                    when (noiseMode) {
-                        NoiseMode.OFF -> {
-                            // Process exactly like old code for consistency
-                            for (i in 0 until n) {
-                                val sample = inChunk[i].toInt()
-                                var v = (sample * gainMultiplier * volumeMultiplier)
-                                if (v > Short.MAX_VALUE) v = Short.MAX_VALUE.toFloat()
-                                if (v < Short.MIN_VALUE) v = Short.MIN_VALUE.toFloat()
-                                outBuffer[i] = v.toInt().toShort()
-                            }
-                        }
-                        NoiseMode.LIGHT -> {
-                            // Built-in effects are applied directly to AudioRecord session; here we just scale
-                            for (i in 0 until n) {
-                                val sample = inChunk[i].toInt()
-                                var v = (sample * gainMultiplier * volumeMultiplier)
-                                if (v > Short.MAX_VALUE) v = Short.MAX_VALUE.toFloat()
-                                if (v < Short.MIN_VALUE) v = Short.MIN_VALUE.toFloat()
-                                outBuffer[i] = v.toInt().toShort()
-                            }
-                        }
-                        NoiseMode.EXTREME -> {
-                            if (rnHandle != 0L && rnAvailable) {
-                                // Convert to float [-1,1] for RNNoise processing
-                                val floats = FloatArray(n)
-                                for (i in 0 until n) {
-                                    floats[i] = inChunk[i] / 32768.0f
-                                }
-                                // RNNoise processing
-                                val processed = try {
-                                    RNNoise.process(rnHandle, floats)
-                                } catch (t: Throwable) {
-                                    // Fallback passthrough on failure
-                                    floats
-                                }
-                                // Convert back to Short and apply gain/volume
-                                for (i in 0 until n) {
-                                    val sample = (processed[i] * 32768.0f).toInt()
-                                    var v = (sample * gainMultiplier * volumeMultiplier)
-                                    if (v > Short.MAX_VALUE) v = Short.MAX_VALUE.toFloat()
-                                    if (v < Short.MIN_VALUE) v = Short.MIN_VALUE.toFloat()
-                                    outBuffer[i] = v.toInt().toShort()
-                                }
-                            } else {
-                                // Fallback when RNNoise not available
-                                for (i in 0 until n) {
-                                    val sample = inChunk[i].toInt()
-                                    var v = (sample * gainMultiplier * volumeMultiplier)
-                                    if (v > Short.MAX_VALUE) v = Short.MAX_VALUE.toFloat()
-                                    if (v < Short.MIN_VALUE) v = Short.MIN_VALUE.toFloat()
-                                    outBuffer[i] = v.toInt().toShort()
-                                }
-                            }
-                        }
-                    }
+
+                    // Use strategy pattern: Current processor handles all processing
+                    val gain = gainMultiplier
+                    val volume = volumeMultiplier
+                    val processor = currentProcessor
+                    
+                    // Calculate input levels for logging
+                    val inRms = calcRms(inChunk)
+                    val inPeak = calcPeak(inChunk)
+                    
+                    // Process with current mode's processor
+                    processor.process(inChunk, outBuffer, gain, volume)
+                    
+                    // Calculate output levels for logging
+                    val outRms = calcRms(outBuffer)
+                    val outPeak = calcPeak(outBuffer)
+                    
+                    // Log with processor description
+                    logger?.logFrame(
+                        noiseMode.name,
+                        inRms, inPeak,
+                        inRms * gain, inPeak * gain,
+                        outRms, outPeak,
+                        "${processor.getDescription()};gain=$gain;vol=$volume",
+                        ""
+                    )
+
                     track.write(outBuffer, 0, n, AudioTrack.WRITE_BLOCKING)
                 }
             } catch (t: Throwable) {
@@ -233,59 +244,31 @@ class AudioProcessor(private val context: Context) {
             }
         }
     }
-
-    private fun enableEffectsIfSupported() {
-        try {
-            val sessionId = audioRecord?.audioSessionId ?: return
-            if (NoiseSuppressor.isAvailable()) {
-                ns?.release(); ns = null
-                ns = NoiseSuppressor.create(sessionId)
-                ns?.enabled = true
-            }
-            if (AutomaticGainControl.isAvailable()) {
-                agc?.release(); agc = null
-                agc = AutomaticGainControl.create(sessionId)
-                agc?.enabled = true
-            }
-            if (AcousticEchoCanceler.isAvailable()) {
-                aec?.release(); aec = null
-                aec = AcousticEchoCanceler.create(sessionId)
-                aec?.enabled = true
-            }
-        } catch (t: Throwable) {
-            Log.w(tag, "Effect enable failed: ${t.message}")
+    
+    /**
+     * Calculate RMS (Root Mean Square) level of PCM16 buffer
+     */
+    private fun calcRms(buffer: ShortArray): Float {
+        if (buffer.isEmpty()) return 0f
+        var sum = 0.0
+        for (sample in buffer) {
+            val normalized = sample / 32768f
+            sum += (normalized * normalized)
         }
+        return kotlin.math.sqrt(sum / buffer.size).toFloat()
     }
-
-    private fun disableEffects() {
-        try { ns?.enabled = false } catch (_: Throwable) {}
-        try { agc?.enabled = false } catch (_: Throwable) {}
-        try { aec?.enabled = false } catch (_: Throwable) {}
-    }
-
-    private fun releaseEffects() {
-        try { ns?.release() } catch (_: Throwable) {}
-        try { agc?.release() } catch (_: Throwable) {}
-        try { aec?.release() } catch (_: Throwable) {}
-        ns = null; agc = null; aec = null
-    }
-
-    private fun setupRn() {
-        if (rnHandle != 0L) return
-        rnAvailable = try {
-            rnHandle = RNNoise.init()
-            rnHandle != 0L
-        } catch (t: Throwable) { false }
-        if (!rnAvailable) {
-            Log.w(tag, "RNNoise not available; falling back to passthrough")
+    
+    /**
+     * Calculate peak level of PCM16 buffer
+     */
+    private fun calcPeak(buffer: ShortArray): Float {
+        if (buffer.isEmpty()) return 0f
+        var peak = 0f
+        for (sample in buffer) {
+            val abs = kotlin.math.abs(sample / 32768f)
+            if (abs > peak) peak = abs
         }
+        return peak
     }
 
-    private fun teardownRn() {
-        if (rnHandle != 0L) {
-            try { RNNoise.release(rnHandle) } catch (_: Throwable) {}
-            rnHandle = 0L
-        }
-        rnAvailable = false
-    }
 }

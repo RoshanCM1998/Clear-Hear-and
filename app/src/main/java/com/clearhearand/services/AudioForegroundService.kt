@@ -1,4 +1,4 @@
-package com.clearhearand
+package com.clearhearand.services
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -22,6 +22,7 @@ class AudioForegroundService : Service() {
         const val ACTION_START = "com.clearhearand.action.START"
         const val ACTION_STOP = "com.clearhearand.action.STOP"
         const val ACTION_SET_MODE = "com.clearhearand.action.SET_MODE"
+        const val ACTION_SET_PARAMS = "com.clearhearand.action.SET_PARAMS"
 
         const val EXTRA_GAIN_100X = "extra_gain_100x"
         const val EXTRA_VOL_100X = "extra_vol_100x"
@@ -60,6 +61,12 @@ class AudioForegroundService : Service() {
                 val mode = runCatching { NoiseMode.valueOf(modeStr) }.getOrDefault(NoiseMode.LIGHT)
                 debugLog("Switching mode to $mode")
                 processor?.setNoiseMode(mode)
+            }
+            ACTION_SET_PARAMS -> {
+                val gain100 = intent.getIntExtra(EXTRA_GAIN_100X, 100)
+                val vol100 = intent.getIntExtra(EXTRA_VOL_100X, 100)
+                debugLog("Updating params: gain=$gain100, volume=$vol100")
+                processor?.setGainAndVolume(gain100, vol100)
             }
             ACTION_STOP -> {
                 processor?.stop()
