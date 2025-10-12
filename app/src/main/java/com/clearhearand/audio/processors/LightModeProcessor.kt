@@ -153,14 +153,14 @@ class LightModeProcessor : IAudioModeProcessor {
             Log.w(tag, "AcousticEchoCanceler setup failed: ${e.message}")
         }
         
-        // Initialize software spectral noise gate
+        // Initialize software spectral noise gate (V3 - SMART ADAPTIVE)
         try {
             noiseGate = SpectralNoiseGate(
                 sampleRate = sampleRate,
-                noiseThresholdDb = -50f,  // Gentle threshold
-                reductionDb = -20f         // Reduce noise by 20dB
+                noiseThresholdDb = -40f,  // Threshold for noise detection
+                reductionDb = -12f        // More aggressive: -12dB = 75% noise reduction
             )
-            Log.d(tag, "SpectralNoiseGate initialized")
+            Log.d(tag, "SpectralNoiseGate V3 initialized (smart mode: -12dB reduction, 10ms attack, 200ms hold, 200ms release)")
         } catch (e: Exception) {
             Log.w(tag, "SpectralNoiseGate setup failed: ${e.message}")
         }
