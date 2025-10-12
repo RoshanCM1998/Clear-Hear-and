@@ -1,4 +1,4 @@
-package com.clearhearand
+package com.clearhearand.ui
 
 import android.Manifest
 import android.content.ContentValues
@@ -16,6 +16,9 @@ import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import com.clearhearand.R
+import com.clearhearand.audio.NoiseMode
+import com.clearhearand.services.AudioForegroundService
 import java.io.File
 import java.io.FileInputStream
 import java.text.SimpleDateFormat

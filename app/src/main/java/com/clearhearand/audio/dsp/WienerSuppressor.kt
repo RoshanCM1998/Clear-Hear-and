@@ -1,4 +1,4 @@
-package com.clearhearand.audio
+package com.clearhearand.audio.dsp
 
 import kotlin.math.max
 

@@ -20,12 +20,12 @@
         android:theme="@style/Theme.ClearHearAnd">
 
         <service
-            android:name=".AudioForegroundService"
+            android:name=".services.AudioForegroundService"
             android:exported="false"
             android:foregroundServiceType="microphone|mediaPlayback" />
 
         <activity
-            android:name=".MainActivity"
+            android:name=".ui.MainActivity"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

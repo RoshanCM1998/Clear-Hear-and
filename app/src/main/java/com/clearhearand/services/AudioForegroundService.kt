@@ -1,4 +1,4 @@
-package com.clearhearand
+package com.clearhearand.services
 
 import android.app.Notification
 import android.app.NotificationChannel

@@ -2,19 +2,35 @@ package com.clearhearand.audio
 
 import android.content.Context
 import android.media.*
-import android.media.audiofx.AcousticEchoCanceler
-import android.media.audiofx.AutomaticGainControl
-import android.media.audiofx.NoiseSuppressor
 import android.util.Log
+import com.clearhearand.audio.logging.AudioLogger
+import com.clearhearand.audio.processors.IAudioModeProcessor
+import com.clearhearand.audio.processors.ExtremeModeProcessor
+import com.clearhearand.audio.processors.LightModeProcessor
+import com.clearhearand.audio.processors.OffModeProcessor
 import com.example.audio.RNNoise
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.max
-import kotlin.math.min
+import kotlin.math.sqrt
 
-enum class NoiseMode { OFF, LIGHT, EXTREME }
+/**
+ * Noise cancellation modes available to the user.
+ * 
+ * Each mode has a corresponding processor implementation in the processors package.
+ */
+enum class NoiseMode {
+    /** No noise cancellation - pure passthrough */
+    OFF,
+    
+    /** Mild noise reduction using Android built-in effects */
+    LIGHT,
+    
+    /** Strong noise reduction for very noisy environments */
+    EXTREME
+}
 
 class AudioProcessor(private val context: Context) {
     private val tag = "AudioProcessor"
@@ -27,18 +43,13 @@ class AudioProcessor(private val context: Context) {
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
 
-    private var ns: NoiseSuppressor? = null
-    private var agc: AutomaticGainControl? = null
-    private var aec: AcousticEchoCanceler? = null
-
     @Volatile private var noiseMode: NoiseMode = NoiseMode.LIGHT
 
     @Volatile private var gainMultiplier: Float = 1.0f
     @Volatile private var volumeMultiplier: Float = 1.0f
 
-    // RNNoise
+    // RNNoise handle (for future use in EXTREME mode if needed)
     private var rnHandle: Long = 0L
-    private var rnAvailable: Boolean = false
 
     // Audio format - KEEP at 48kHz and 100ms for original quality
     private val sampleRate = 48000  // Restored to match old code for better quality or 16000
@@ -46,13 +57,9 @@ class AudioProcessor(private val context: Context) {
     private val channelOut = AudioFormat.CHANNEL_OUT_MONO
     private val encoding = AudioFormat.ENCODING_PCM_16BIT
 
-    // DSP components - NULLABLE so they're only created when needed (LIGHT/EXTREME modes)
-    private var hp300: Biquad? = null
-    private var lp3400: Biquad? = null
-    private var softLimiter: SoftLimiter? = null
-    private var wienerLight: WienerSuppressor? = null
-    private var wienerExtreme: WienerSuppressor? = null
-
+    // Strategy pattern: Different processor for each mode
+    private var currentProcessor: IAudioModeProcessor = OffModeProcessor()
+    
     private var logger: AudioLogger? = null
 
     fun start(initialMode: NoiseMode = NoiseMode.LIGHT, gain100x: Int = 100, volume100x: Int = 100) {
@@ -65,16 +72,8 @@ class AudioProcessor(private val context: Context) {
 
         setupAudio()
         
-        // Enable Android effects for LIGHT/EXTREME modes
-        when (initialMode) {
-            NoiseMode.LIGHT, NoiseMode.EXTREME -> {
-                enableEffectsIfSupported()
-                Log.d(tag, "Started in $initialMode mode with Android effects")
-            }
-            NoiseMode.OFF -> {
-                Log.d(tag, "Started in OFF mode")
-            }
-        }
+        // Create processor for initial mode
+        createProcessorForMode(initialMode)
         
         startThreads()
     }
@@ -83,8 +82,7 @@ class AudioProcessor(private val context: Context) {
         if (!isRunning.getAndSet(false)) return
         try { audioRecord?.stop() } catch (_: Throwable) {}
         try { audioTrack?.stop() } catch (_: Throwable) {}
-        releaseEffects()
-        destroyAllDsp()  // Clean up DSP components
+        currentProcessor.cleanup()
         audioRecord?.release(); audioRecord = null
         audioTrack?.release(); audioTrack = null
         queue.clear()
@@ -100,32 +98,38 @@ class AudioProcessor(private val context: Context) {
         noiseMode = mode
         if (!isRunning.get()) return
 
-        // CRITICAL: When switching modes, properly clean up old mode and setup new mode
-        when (mode) {
+        // Strategy pattern: Switch to different processor
+        Log.d(tag, "Switching from $oldMode to $mode")
+        createProcessorForMode(mode)
+    }
+    
+    /**
+     * Create and setup processor for the specified mode
+     * Cleans up old processor first
+     */
+    private fun createProcessorForMode(mode: NoiseMode) {
+        // Cleanup old processor
+        currentProcessor.cleanup()
+        
+        // Create new processor based on mode
+        currentProcessor = when (mode) {
             NoiseMode.OFF -> {
-                // OFF mode: Disable EVERYTHING
-                disableEffects()
-                releaseEffects()  // Actually release Android effects
-                teardownRn()
-                destroyAllDsp()  // Destroy ALL DSP components
-                Log.d(tag, "Switched to OFF: All DSP and effects disabled")
+                Log.d(tag, "Created OffModeProcessor")
+                OffModeProcessor()
             }
             NoiseMode.LIGHT -> {
-                // LIGHT mode: Enable Android effects only (no custom DSP)
-                teardownRn()  // No RNNoise
-                destroyAllDsp()  // No custom DSP
-                enableEffectsIfSupported()  // Android built-in effects
-                Log.d(tag, "Switched to LIGHT: Android effects enabled")
+                Log.d(tag, "Created LightModeProcessor")
+                LightModeProcessor()
             }
             NoiseMode.EXTREME -> {
-                // EXTREME mode: Keep Android effects enabled (stronger settings if possible)
-                // For now, same as LIGHT until we implement windowed DSP
-                teardownRn()
-                destroyAllDsp()
-                enableEffectsIfSupported()  // Keep Android effects enabled
-                Log.d(tag, "Switched to EXTREME: Android effects enabled (same as LIGHT for now)")
+                Log.d(tag, "Created ExtremeModeProcessor")
+                ExtremeModeProcessor()
             }
         }
+        
+        // Setup new processor
+        currentProcessor.setup(audioRecord, sampleRate)
+        Log.d(tag, "Active processor: ${currentProcessor.getDescription()}")
     }
 
     fun setGainAndVolume(gain100x: Int, volume100x: Int) {
@@ -176,54 +180,6 @@ class AudioProcessor(private val context: Context) {
         audioTrack?.play()
     }
 
-    /**
-     * Initialize DSP components based on mode
-     * CRITICAL: OFF mode gets NOTHING initialized
-     * NOTE: Currently LIGHT and EXTREME use only Android built-in effects, no custom DSP
-     */
-    private fun initializeDspForMode(mode: NoiseMode) {
-        when (mode) {
-            NoiseMode.OFF -> {
-                // OFF mode: NO DSP components at all
-                destroyAllDsp()
-                Log.d(tag, "OFF mode: No DSP")
-            }
-            NoiseMode.LIGHT -> {
-                // LIGHT mode: Only Android built-in effects (no custom DSP for now)
-                destroyAllDsp()
-                Log.d(tag, "LIGHT mode: Android built-in effects only")
-            }
-            NoiseMode.EXTREME -> {
-                // EXTREME mode: Only Android built-in effects (no custom DSP for now)
-                // Note: Android effects disabled in EXTREME, so this is currently same as OFF
-                destroyAllDsp()
-                Log.d(tag, "EXTREME mode: Currently same as LIGHT (Android effects)")
-            }
-        }
-    }
-
-    /**
-     * Destroy ALL DSP components - used when switching to OFF or between modes
-     */
-    private fun destroyAllDsp() {
-        hp300 = null
-        lp3400 = null
-        softLimiter = null
-        wienerLight = null
-        wienerExtreme = null
-    }
-
-    private fun calcRmsPeak(buf: FloatArray): Pair<Float, Float> {
-        var sum = 0.0
-        var peak = 0f
-        for (v in buf) {
-            sum += (v * v)
-            val a = abs(v)
-            if (a > peak) peak = a
-        }
-        val rms = kotlin.math.sqrt(sum / buf.size).toFloat()
-        return rms to peak
-    }
 
     private fun startThreads() {
         val rec = audioRecord ?: return
@@ -251,18 +207,35 @@ class AudioProcessor(private val context: Context) {
             try {
                 val track = audioTrack ?: return@execute
                 val outBuffer = ShortArray((sampleRate * 100) / 1000)  // 100ms chunks to match old code
-                val floatBuffer = FloatArray((sampleRate * 100) / 1000)
                 while (isRunning.get()) {
                     val inChunk = queue.take()
                     val n = inChunk.size
 
-                    // Read mode once for this frame to avoid race conditions
-                    val currentMode = noiseMode
-                    when (currentMode) {
-                        NoiseMode.OFF -> processOff(inChunk, outBuffer)
-                        NoiseMode.LIGHT -> processLight(inChunk, floatBuffer, outBuffer)
-                        NoiseMode.EXTREME -> processExtreme(inChunk, floatBuffer, outBuffer)
-                    }
+                    // Use strategy pattern: Current processor handles all processing
+                    val gain = gainMultiplier
+                    val volume = volumeMultiplier
+                    val processor = currentProcessor
+                    
+                    // Calculate input levels for logging
+                    val inRms = calcRms(inChunk)
+                    val inPeak = calcPeak(inChunk)
+                    
+                    // Process with current mode's processor
+                    processor.process(inChunk, outBuffer, gain, volume)
+                    
+                    // Calculate output levels for logging
+                    val outRms = calcRms(outBuffer)
+                    val outPeak = calcPeak(outBuffer)
+                    
+                    // Log with processor description
+                    logger?.logFrame(
+                        noiseMode.name,
+                        inRms, inPeak,
+                        inRms * gain, inPeak * gain,
+                        outRms, outPeak,
+                        "${processor.getDescription()};gain=$gain;vol=$volume",
+                        ""
+                    )
 
                     track.write(outBuffer, 0, n, AudioTrack.WRITE_BLOCKING)
                 }
@@ -271,176 +244,31 @@ class AudioProcessor(private val context: Context) {
             }
         }
     }
-
+    
     /**
-     * OFF Mode: Pure pass-through with NO filtering
-     * - Directly route input → gain → master volume → output
-     * - NO band-pass, NO noise suppression, NO AGC, NO limiter
-     * - NO Android built-in effects
-     * - Maintains same loudness as original pre-noise-cancel implementation
-     * - Processes EXACTLY like the old code
+     * Calculate RMS (Root Mean Square) level of PCM16 buffer
      */
-    private fun processOff(inChunk: ShortArray, outShorts: ShortArray) {
-        val gain = gainMultiplier
-        val volume = volumeMultiplier
-
-        // Process exactly like old code for consistency
-        for (i in inChunk.indices) {
-            val sample = inChunk[i].toInt()
-            var v = (sample * gain * volume)
-            if (v > Short.MAX_VALUE) v = Short.MAX_VALUE.toFloat()
-            if (v < Short.MIN_VALUE) v = Short.MIN_VALUE.toFloat()
-            outShorts[i] = v.toInt().toShort()
+    private fun calcRms(buffer: ShortArray): Float {
+        if (buffer.isEmpty()) return 0f
+        var sum = 0.0
+        for (sample in buffer) {
+            val normalized = sample / 32768f
+            sum += (normalized * normalized)
         }
-
-        // Log OFF mode (minimal logging, no float conversion needed)
-        if (logger != null && inChunk.isNotEmpty()) {
-            val inSample = inChunk[0] / 32768f
-            val outSample = outShorts[0] / 32768f
-            logger?.logFrame(
-                "OFF",
-                abs(inSample), abs(inSample),
-                abs(inSample) * gain, abs(inSample) * gain,
-                abs(outSample), abs(outSample),
-                "passthrough;gain=$gain;vol=$volume",
-                ""
-            )
-        }
+        return kotlin.math.sqrt(sum / buffer.size).toFloat()
     }
-
+    
     /**
-     * LIGHT Mode: Mild noise reduction with preserved loudness
-     * - Rely on Android built-in effects (NoiseSuppressor, AGC, AEC)
-     * - NO custom DSP (Wiener filter doesn't work with 100ms/48kHz chunks)
-     * - Simple gain/volume control
+     * Calculate peak level of PCM16 buffer
      */
-    private fun processLight(inChunk: ShortArray, floats: FloatArray, outShorts: ShortArray) {
-        val gain = gainMultiplier
-        val volume = volumeMultiplier
-
-        // Android built-in effects are already applied to audioRecord
-        // Just do simple gain/volume processing like OFF mode
-        for (i in inChunk.indices) {
-            val sample = inChunk[i].toInt()
-            var v = (sample * gain * volume)
-            if (v > Short.MAX_VALUE) v = Short.MAX_VALUE.toFloat()
-            if (v < Short.MIN_VALUE) v = Short.MIN_VALUE.toFloat()
-            outShorts[i] = v.toInt().toShort()
+    private fun calcPeak(buffer: ShortArray): Float {
+        if (buffer.isEmpty()) return 0f
+        var peak = 0f
+        for (sample in buffer) {
+            val abs = kotlin.math.abs(sample / 32768f)
+            if (abs > peak) peak = abs
         }
-
-        // Log for verification
-        if (inChunk.isNotEmpty()) {
-            val inSample = inChunk[0] / 32768f
-            val outSample = outShorts[0] / 32768f
-            logger?.logFrame(
-                "LIGHT",
-                abs(inSample), abs(inSample),
-                abs(inSample) * gain, abs(inSample) * gain,
-                abs(outSample), abs(outSample),
-                "android_effects;gain=$gain;vol=$volume",
-                ""
-            )
-        }
+        return peak
     }
 
-    /**
-     * EXTREME Mode: Currently same as LIGHT mode
-     * - Android built-in effects provide the noise suppression
-     * - Custom DSP (Wiener/RNNoise) doesn't work with 100ms/48kHz chunks
-     * - TODO: Implement proper windowed processing if needed
-     */
-    private fun processExtreme(inChunk: ShortArray, floats: FloatArray, outShorts: ShortArray) {
-        val gain = gainMultiplier
-        val volume = volumeMultiplier
-
-        // For now, same as LIGHT mode - rely on Android effects
-        // In future, could add custom DSP with proper windowing
-        for (i in inChunk.indices) {
-            val sample = inChunk[i].toInt()
-            var v = (sample * gain * volume)
-            if (v > Short.MAX_VALUE) v = Short.MAX_VALUE.toFloat()
-            if (v < Short.MIN_VALUE) v = Short.MIN_VALUE.toFloat()
-            outShorts[i] = v.toInt().toShort()
-        }
-
-        // Log for verification
-        if (inChunk.isNotEmpty()) {
-            val inSample = inChunk[0] / 32768f
-            val outSample = outShorts[0] / 32768f
-            logger?.logFrame(
-                "EXTREME",
-                abs(inSample), abs(inSample),
-                abs(inSample) * gain, abs(inSample) * gain,
-                abs(outSample), abs(outSample),
-                "android_effects;gain=$gain;vol=$volume",
-                ""
-            )
-        }
-    }
-
-    private fun enableEffectsIfSupported() {
-        try {
-            val sessionId = audioRecord?.audioSessionId ?: return
-            if (NoiseSuppressor.isAvailable()) {
-                ns?.release(); ns = null
-                ns = NoiseSuppressor.create(sessionId)
-                ns?.enabled = true
-                Log.d(tag, "NoiseSuppressor enabled")
-            }
-            if (AutomaticGainControl.isAvailable()) {
-                agc?.release(); agc = null
-                agc = AutomaticGainControl.create(sessionId)
-                agc?.enabled = true
-                Log.d(tag, "AutomaticGainControl enabled")
-            }
-            if (AcousticEchoCanceler.isAvailable()) {
-                aec?.release(); aec = null
-                aec = AcousticEchoCanceler.create(sessionId)
-                aec?.enabled = true
-                Log.d(tag, "AcousticEchoCanceler enabled")
-            }
-        } catch (t: Throwable) {
-            Log.w(tag, "Effect enable failed: ${t.message}")
-        }
-    }
-
-    private fun disableEffects() {
-        try { ns?.enabled = false; Log.d(tag, "NoiseSuppressor disabled") } catch (_: Throwable) {}
-        try { agc?.enabled = false; Log.d(tag, "AGC disabled") } catch (_: Throwable) {}
-        try { aec?.enabled = false; Log.d(tag, "AEC disabled") } catch (_: Throwable) {}
-    }
-
-    private fun releaseEffects() {
-        try { ns?.release(); Log.d(tag, "NoiseSuppressor released") } catch (_: Throwable) {}
-        try { agc?.release(); Log.d(tag, "AGC released") } catch (_: Throwable) {}
-        try { aec?.release(); Log.d(tag, "AEC released") } catch (_: Throwable) {}
-        ns = null; agc = null; aec = null
-    }
-
-    private fun setupRn() {
-        if (rnHandle != 0L) return
-        rnAvailable = try {
-            rnHandle = RNNoise.init()
-            val success = rnHandle != 0L
-            if (success) Log.d(tag, "RNNoise initialized")
-            success
-        } catch (t: Throwable) {
-            Log.w(tag, "RNNoise init failed: ${t.message}")
-            false
-        }
-        if (!rnAvailable) {
-            Log.w(tag, "RNNoise not available; falling back to Wiener")
-        }
-    }
-
-    private fun teardownRn() {
-        if (rnHandle != 0L) {
-            try {
-                RNNoise.release(rnHandle)
-                Log.d(tag, "RNNoise released")
-            } catch (_: Throwable) {}
-            rnHandle = 0L
-        }
-        rnAvailable = false
-    }
 }

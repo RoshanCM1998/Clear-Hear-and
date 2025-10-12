@@ -1,4 +1,4 @@
-package com.clearhearand.audio
+package com.clearhearand.audio.logging
 
 import android.content.Context
 import java.io.File
@@ -40,9 +40,12 @@ class AudioLogger(context: Context) {
     ) {
         val n = frameCounter.incrementAndGet()
         if (n % 200 != 0) return // Log roughly every 1s at 48kHz/100ms = 10 frames/sec
-        val ts = System.currentTimeMillis()
+        
+        // Human-readable timestamp: YYYY-MM-DD HH:mm:ss
+        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
+        
         try {
-            writer.write("$ts,$mode,$inRms,$inPeak,$afterGainRms,$afterGainPeak,$afterVolRms,$afterVolPeak,${params.replace(',', ';')},${flags.replace(',', ';')}\n")
+            writer.write("$timestamp,$mode,$inRms,$inPeak,$afterGainRms,$afterGainPeak,$afterVolRms,$afterVolPeak,${params.replace(',', ';')},${flags.replace(',', ';')}\n")
             writer.flush()
         } catch (_: Throwable) {}
     }
