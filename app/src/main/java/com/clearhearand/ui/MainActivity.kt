@@ -33,8 +33,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var applyParamsButton: Button
     private lateinit var exportButton: Button
     private lateinit var clearLogsButton: Button
+    private lateinit var recordNoiseButton: Button
+    private lateinit var strategyGroup: RadioGroup
+    private lateinit var strategyLabel: TextView
 
     private var isRunning: Boolean = false
+    private var isRecordingNoise: Boolean = false
 
     private val requestPermission = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -75,6 +79,12 @@ class MainActivity : AppCompatActivity() {
             addView(extreme)
             check(light.id)
             setOnCheckedChangeListener { _, checkedId ->
+                // Update LIGHT mode controls visibility
+                val isLightMode = checkedId == light.id
+                recordNoiseButton.visibility = if (isLightMode) View.VISIBLE else View.GONE
+                strategyLabel.visibility = if (isLightMode) View.VISIBLE else View.GONE
+                strategyGroup.visibility = if (isLightMode) View.VISIBLE else View.GONE
+                
                 if (!isRunning) return@setOnCheckedChangeListener
                 val mode = when (checkedId) {
                     off.id -> "OFF"
@@ -85,6 +95,56 @@ class MainActivity : AppCompatActivity() {
                 val intent = Intent(this@MainActivity, AudioForegroundService::class.java).apply {
                     action = AudioForegroundService.ACTION_SET_MODE
                     putExtra(AudioForegroundService.EXTRA_MODE, mode)
+                }
+                startService(intent)
+            }
+        }
+
+        // Strategy selector for LIGHT mode (4 filtering options)
+        strategyLabel = TextView(this).apply {
+            text = "Filter Strategy (LIGHT mode only)"
+            visibility = View.VISIBLE  // Visible since LIGHT is pre-selected
+        }
+        
+        strategyGroup = RadioGroup(this).apply {
+            orientation = RadioGroup.VERTICAL
+            val android = RadioButton(this@MainActivity).apply {
+                text = "Android Effects (Hardware)"
+                id = View.generateViewId()
+            }
+            val highpass = RadioButton(this@MainActivity).apply {
+                text = "High-Pass Filter (DC + 80Hz)"
+                id = View.generateViewId()
+            }
+            val adaptive = RadioButton(this@MainActivity).apply {
+                text = "Adaptive Gate (HP + Gating)"
+                id = View.generateViewId()
+            }
+            val custom = RadioButton(this@MainActivity).apply {
+                text = "Custom Profile (Learned)"
+                id = View.generateViewId()
+            }
+            addView(android)
+            addView(highpass)
+            addView(adaptive)
+            addView(custom)
+            check(android.id)  // Default to Android effects
+            visibility = View.VISIBLE  // Visible since LIGHT is pre-selected
+            
+            setOnCheckedChangeListener { _, checkedId ->
+                if (!isRunning) return@setOnCheckedChangeListener
+                
+                val strategy = when (checkedId) {
+                    android.id -> "android"
+                    highpass.id -> "highpass"
+                    adaptive.id -> "adaptive"
+                    custom.id -> "custom"
+                    else -> "android"
+                }
+                
+                val intent = Intent(this@MainActivity, AudioForegroundService::class.java).apply {
+                    action = AudioForegroundService.ACTION_SET_LIGHT_STRATEGY
+                    putExtra(AudioForegroundService.EXTRA_LIGHT_STRATEGY, strategy)
                 }
                 startService(intent)
             }
@@ -111,6 +171,12 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { clearLogsToday() }
         }
 
+        recordNoiseButton = Button(this).apply {
+            text = "Record Noise Profile (5s)"
+            visibility = View.VISIBLE  // Visible by default since LIGHT mode is pre-selected
+            setOnClickListener { recordNoiseProfile() }
+        }
+
         // Add components with 16dp bottom margins for better spacing
         val marginDp = (16 * resources.displayMetrics.density).toInt()
         
@@ -124,6 +190,26 @@ class MainActivity : AppCompatActivity() {
             return this
         }
         
+        // Version footer
+        val versionFooter = TextView(this).apply {
+            try {
+                val versionName = packageManager.getPackageInfo(packageName, 0).versionName
+                val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    packageManager.getPackageInfo(packageName, 0).longVersionCode
+                } else {
+                    @Suppress("DEPRECATION")
+                    packageManager.getPackageInfo(packageName, 0).versionCode.toLong()
+                }
+                text = "v$versionName (build $versionCode)"
+            } catch (e: Exception) {
+                text = "v1.0.0"
+            }
+            setTextColor(0xFF999999.toInt())  // Light gray
+            textSize = 10f
+            gravity = android.view.Gravity.CENTER
+            setPadding(0, marginDp * 2, 0, 0)  // Extra top padding
+        }
+        
         rootLayout.addView(gainLabel)
         rootLayout.addView(gainInput.withMarginBottom())
         rootLayout.addView(volLabel)
@@ -131,9 +217,13 @@ class MainActivity : AppCompatActivity() {
         rootLayout.addView(applyParamsButton.withMarginBottom())
         rootLayout.addView(modeLabel)
         rootLayout.addView(modeGroup.withMarginBottom())
+        rootLayout.addView(strategyLabel)  // Only visible in LIGHT mode
+        rootLayout.addView(strategyGroup.withMarginBottom())  // Only visible in LIGHT mode
+        rootLayout.addView(recordNoiseButton.withMarginBottom())  // Only visible in LIGHT mode
         rootLayout.addView(startStopButton.withMarginBottom())
         rootLayout.addView(exportButton.withMarginBottom())
-        rootLayout.addView(clearLogsButton)
+        rootLayout.addView(clearLogsButton.withMarginBottom())
+        rootLayout.addView(versionFooter)
 
         setContentView(rootLayout)
     }
@@ -192,30 +282,140 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun clearLogsToday() {
-        val srcDir = File(getExternalFilesDir(null), "logs")
-        if (!srcDir.exists()) {
+        val logsDir = File(getExternalFilesDir(null), "logs")
+        if (!logsDir.exists()) {
             Toast.makeText(this, "No logs directory found", Toast.LENGTH_SHORT).show()
             return
         }
-        val today = SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())
-        val file = File(srcDir, "hearing_log_${today}.txt")
-        if (!file.exists()) {
-            Toast.makeText(this, "No log for today", Toast.LENGTH_SHORT).show()
-            return
-        }
+        
         try {
-            // Read the first line (header)
-            val headerLine = file.bufferedReader().use { reader ->
-                reader.readLine()
+            var clearedCount = 0
+            
+            // Clear ALL hearing log files from ALL days (keep headers)
+            logsDir.listFiles { file -> file.name.startsWith("hearing_log_") && file.extension == "txt" }
+                ?.forEach { file ->
+                    try {
+                        val headerLine = file.bufferedReader().use { it.readLine() }
+                        file.writeText(headerLine + "\n")
+                        clearedCount++
+                    } catch (e: Throwable) {
+                        // Skip this file
+                    }
+                }
+            
+            // Delete noise profile file completely
+            val noiseFile = File(logsDir, "noise_profile.txt")
+            if (noiseFile.exists()) {
+                noiseFile.delete()
+                clearedCount++
             }
             
-            // Clear file and write back only the header
-            file.writeText(headerLine + "\n")
-            
-            Toast.makeText(this, "Cleared today's log (kept header)", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Cleared $clearedCount log file(s) from all days + noise profile", Toast.LENGTH_LONG).show()
         } catch (e: Throwable) {
-            Toast.makeText(this, "Clear failed: ${e.message}", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Clear failed: ${e.message}", Toast.LENGTH_LONG).show()
         }
+    }
+    
+    private fun recordNoiseProfile() {
+        if (isRecordingNoise) {
+            Toast.makeText(this, "Already recording noise profile", Toast.LENGTH_SHORT).show()
+            return
+        }
+        
+        if (!hasMicPermission()) {
+            requestNeededPermissions()
+            Toast.makeText(this, "Need microphone permission", Toast.LENGTH_SHORT).show()
+            return
+        }
+        
+        isRecordingNoise = true
+        recordNoiseButton.isEnabled = false
+        recordNoiseButton.text = "Recording..."
+        
+        // Record in background thread
+        Thread {
+            try {
+                val logsDir = File(getExternalFilesDir(null), "logs")
+                if (!logsDir.exists()) logsDir.mkdirs()
+                
+                // Use fixed filename to overwrite old recordings (no timestamp = single file)
+                val noiseFile = File(logsDir, "noise_profile.txt")
+                
+                // Record 5 seconds of audio (48000 Hz, 100ms chunks = 50 chunks)
+                val sampleRate = 48000
+                val chunkSize = 4800  // 100ms at 48kHz
+                val numChunks = 50    // 5 seconds
+                
+                val recorder = android.media.AudioRecord(
+                    android.media.MediaRecorder.AudioSource.MIC,
+                    sampleRate,
+                    android.media.AudioFormat.CHANNEL_IN_MONO,
+                    android.media.AudioFormat.ENCODING_PCM_16BIT,
+                    chunkSize * 4
+                )
+                
+                recorder.startRecording()
+                
+                val writer = noiseFile.bufferedWriter()
+                writer.write("# Noise Profile Recording\n")
+                writer.write("# Sample Rate: $sampleRate Hz\n")
+                writer.write("# Chunk Size: $chunkSize samples (100ms)\n")
+                writer.write("# Format: chunk_number,rms,peak,samples...\n")
+                writer.write("#\n")
+                
+                val buffer = ShortArray(chunkSize)
+                
+                for (chunk in 0 until numChunks) {
+                    val read = recorder.read(buffer, 0, buffer.size)
+                    if (read > 0) {
+                        // Calculate RMS and peak
+                        var sum = 0.0
+                        var peak = 0
+                        for (i in 0 until read) {
+                            val sample = buffer[i].toInt()
+                            sum += sample * sample
+                            if (kotlin.math.abs(sample) > peak) peak = kotlin.math.abs(sample)
+                        }
+                        val rms = kotlin.math.sqrt(sum / read)
+                        
+                        // Write chunk info
+                        writer.write("$chunk,$rms,$peak")
+                        
+                        // Write first 100 samples for frequency analysis
+                        for (i in 0 until minOf(100, read)) {
+                            writer.write(",${buffer[i]}")
+                        }
+                        writer.write("\n")
+                    }
+                    
+                    // Update progress on UI thread
+                    val progress = ((chunk + 1) * 100 / numChunks)
+                    runOnUiThread {
+                        recordNoiseButton.text = "Recording... $progress%"
+                    }
+                }
+                
+                writer.close()
+                recorder.stop()
+                recorder.release()
+                
+                // Success!
+                runOnUiThread {
+                    recordNoiseButton.text = "Record Noise Profile (5s)"
+                    recordNoiseButton.isEnabled = true
+                    isRecordingNoise = false
+                    Toast.makeText(this, "Noise profile saved: ${noiseFile.name}", Toast.LENGTH_LONG).show()
+                }
+                
+            } catch (e: Throwable) {
+                runOnUiThread {
+                    recordNoiseButton.text = "Record Noise Profile (5s)"
+                    recordNoiseButton.isEnabled = true
+                    isRecordingNoise = false
+                    Toast.makeText(this, "Recording failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
     }
 
     private fun exportLogsToday() {
@@ -224,33 +424,54 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "No logs directory found", Toast.LENGTH_SHORT).show()
             return
         }
-        val today = SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())
-        val file = File(srcDir, "hearing_log_${today}.txt")
-        if (!file.exists()) {
-            Toast.makeText(this, "No log for today", Toast.LENGTH_SHORT).show()
+        
+        // Get all .txt files from logs directory
+        val files = srcDir.listFiles { file -> file.extension == "txt" }
+        if (files == null || files.isEmpty()) {
+            Toast.makeText(this, "No log files found", Toast.LENGTH_SHORT).show()
             return
         }
+        
         val resolver = contentResolver
         val destDirName = "HearingAidLogs"
+        var exportCount = 0
+        var errorCount = 0
+        
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val values = ContentValues().apply {
-                    put(MediaStore.Downloads.DISPLAY_NAME, file.name)
-                    put(MediaStore.Downloads.MIME_TYPE, "text/plain")
-                    put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/$destDirName")
-                }
-                val uri: Uri? = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                if (uri != null) {
-                    resolver.openOutputStream(uri)?.use { out ->
-                        FileInputStream(file).use { it.copyTo(out) }
+            for (file in files) {
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        val values = ContentValues().apply {
+                            put(MediaStore.Downloads.DISPLAY_NAME, file.name)
+                            put(MediaStore.Downloads.MIME_TYPE, "text/plain")
+                            put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/$destDirName")
+                        }
+                        val uri: Uri? = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                        if (uri != null) {
+                            resolver.openOutputStream(uri)?.use { out ->
+                                FileInputStream(file).use { it.copyTo(out) }
+                            }
+                            exportCount++
+                        } else {
+                            errorCount++
+                        }
+                    } else {
+                        val dest = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "$destDirName/${file.name}")
+                        dest.parentFile?.mkdirs()
+                        dest.outputStream().use { out -> FileInputStream(file).use { it.copyTo(out) } }
+                        exportCount++
                     }
+                } catch (e: Throwable) {
+                    errorCount++
                 }
-            } else {
-                val dest = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "$destDirName/${file.name}")
-                dest.parentFile?.mkdirs()
-                dest.outputStream().use { out -> FileInputStream(file).use { it.copyTo(out) } }
             }
-            Toast.makeText(this, "Exported today's log to Downloads/$destDirName", Toast.LENGTH_SHORT).show()
+            
+            val message = if (errorCount == 0) {
+                "Exported $exportCount file(s) to Downloads/$destDirName"
+            } else {
+                "Exported $exportCount file(s), $errorCount failed"
+            }
+            Toast.makeText(this, message, Toast.LENGTH_LONG).show()
         } catch (e: Throwable) {
             Toast.makeText(this, "Export failed: ${e.message}", Toast.LENGTH_SHORT).show()
         }

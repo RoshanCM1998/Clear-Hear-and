@@ -23,10 +23,12 @@ class AudioForegroundService : Service() {
         const val ACTION_STOP = "com.clearhearand.action.STOP"
         const val ACTION_SET_MODE = "com.clearhearand.action.SET_MODE"
         const val ACTION_SET_PARAMS = "com.clearhearand.action.SET_PARAMS"
+        const val ACTION_SET_LIGHT_STRATEGY = "com.clearhearand.action.SET_LIGHT_STRATEGY"
 
         const val EXTRA_GAIN_100X = "extra_gain_100x"
         const val EXTRA_VOL_100X = "extra_vol_100x"
         const val EXTRA_MODE = "extra_noise_mode" // OFF | LIGHT | EXTREME
+        const val EXTRA_LIGHT_STRATEGY = "extra_light_strategy" // android | highpass | adaptive | custom
 
         private const val NOTIF_CHANNEL_ID = "clear_hear_and_channel"
         private const val NOTIF_ID = 101
@@ -67,6 +69,11 @@ class AudioForegroundService : Service() {
                 val vol100 = intent.getIntExtra(EXTRA_VOL_100X, 100)
                 debugLog("Updating params: gain=$gain100, volume=$vol100")
                 processor?.setGainAndVolume(gain100, vol100)
+            }
+            ACTION_SET_LIGHT_STRATEGY -> {
+                val strategy = intent.getStringExtra(EXTRA_LIGHT_STRATEGY) ?: "android"
+                debugLog("Updating LIGHT mode strategy: $strategy")
+                processor?.setLightModeStrategy(strategy)
             }
             ACTION_STOP -> {
                 processor?.stop()

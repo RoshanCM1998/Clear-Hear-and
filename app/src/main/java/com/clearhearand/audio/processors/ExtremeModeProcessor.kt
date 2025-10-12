@@ -133,14 +133,22 @@ class ExtremeModeProcessor : IAudioModeProcessor {
         }
         */
         
-        // Apply band-pass filter (300-3400 Hz - human voice range)
-        // This alone provides good voice isolation
-        bandPassFilter?.process(outChunk)
-        
-        // Apply user's gain and volume
+        // Step 1: Apply gain first
         for (i in outChunk.indices) {
             val sample = outChunk[i].toInt()
-            var v = (sample * gain * volume)
+            var v = (sample * gain)
+            if (v > Short.MAX_VALUE) v = Short.MAX_VALUE.toFloat()
+            if (v < Short.MIN_VALUE) v = Short.MIN_VALUE.toFloat()
+            outChunk[i] = v.toInt().toShort()
+        }
+        
+        // Step 2: Apply band-pass filter (300-3400 Hz - human voice range) to AMPLIFIED signal
+        bandPassFilter?.process(outChunk)
+        
+        // Step 3: Apply volume for final output
+        for (i in outChunk.indices) {
+            val sample = outChunk[i].toInt()
+            var v = (sample * volume)
             
             // Clamp to prevent overflow
             if (v > Short.MAX_VALUE) v = Short.MAX_VALUE.toFloat()
@@ -161,7 +169,7 @@ class ExtremeModeProcessor : IAudioModeProcessor {
         // if (rnAvailable && rnHandle != 0L) active.add("RNNoise")
         if (bandPassFilter != null) active.add("BandPass(300-3400Hz)")
         if (noiseSuppressor?.enabled == true) active.add("Android[NS]")
-        return "EXTREME-${active.joinToString("+")}"
+        return "EXTREME [bandpass] ${active.joinToString("+")}"
     }
     
     /**

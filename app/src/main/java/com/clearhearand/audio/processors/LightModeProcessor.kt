@@ -1,84 +1,113 @@
 package com.clearhearand.audio.processors
 
+import android.content.Context
 import android.media.AudioRecord
-import android.media.audiofx.AcousticEchoCanceler
-import android.media.audiofx.AutomaticGainControl
-import android.media.audiofx.NoiseSuppressor
 import android.util.Log
-import com.clearhearand.audio.dsp.SpectralNoiseGate
+import com.clearhearand.audio.processors.lightmode.*
 
 /**
- * LIGHT Mode Processor - Android Built-in Effects Implementation
+ * LIGHT Mode Processor - Strategy Pattern Implementation
  * 
- * This processor provides mild noise reduction using Android's hardware-accelerated
- * audio effects. These effects run on the device's DSP chip (if available) for
- * efficient, low-latency processing.
+ * This processor delegates to one of multiple filtering strategies:
+ * 1. **Android Effects**: Hardware-accelerated (NS + AGC + AEC)
+ * 2. **High-Pass Filter**: DC blocker + 80Hz high-pass
+ * 3. **Adaptive Gate**: High-pass + noise gating
+ * 4. **Custom Profile**: Learned from recorded noise files
  * 
- * Active effects:
- * - **NoiseSuppressor**: Reduces steady-state background noise (fan, AC, etc.)
- * - **AutomaticGainControl**: Normalizes volume levels automatically
- * - **AcousticEchoCanceler**: Reduces acoustic echo in speakerphone scenarios
+ * The user can switch between strategies in real-time via the UI.
  * 
- * These effects are applied automatically at the AudioRecord level, before we
- * receive the audio data. Our processing just applies the user's gain and volume.
- * 
- * Use cases:
- * - Office environments with moderate background noise
- * - Home use with AC, fan, or computer noise
- * - Daily conversations in typical indoor settings
- * - When natural sound quality is important
- * 
- * Processing pipeline:
- * ```
- * Input (microphone)
- *   ↓
- * Android NoiseSuppressor (hardware, automatic)
- *   ↓
- * Android AGC (hardware, automatic)
- *   ↓
- * Android AEC (hardware, automatic)
- *   ↓
- * Gain multiplication (user control)
- *   ↓
- * Volume multiplication (user control)
- *   ↓
- * Clamp to prevent overflow
- *   ↓
- * Output (speaker/headphones)
- * ```
- * 
+ * @see ILightModeStrategy
  * @see IAudioModeProcessor
  */
-class LightModeProcessor : IAudioModeProcessor {
+class LightModeProcessor(private val context: Context) : IAudioModeProcessor {
     
     private val tag = "LightModeProcessor"
     
-    // Android built-in audio effects (hardware accelerated)
-    private var noiseSuppressor: NoiseSuppressor? = null
-    private var automaticGainControl: AutomaticGainControl? = null
-    private var acousticEchoCanceler: AcousticEchoCanceler? = null
+    // Current active strategy
+    private var currentStrategy: ILightModeStrategy? = null
     
-    // Software-based spectral noise gate (for devices without hardware effects)
-    private var noiseGate: SpectralNoiseGate? = null
+    // Available strategies (lazy initialization)
+    private val strategies = mapOf(
+        "android" to lazy { AndroidEffectsStrategy() },
+        "highpass" to lazy { HighPassFilterStrategy() },
+        "adaptive" to lazy { AdaptiveGateStrategy() },
+        "custom" to lazy { CustomProfileStrategy(context) }
+    )
+    
+    // Current strategy key
+    private var currentStrategyKey: String = "android"  // Default
     
     /**
-     * Process audio with Android effects and user controls.
+     * Set the filtering strategy.
      * 
-     * Android effects are already applied at the AudioRecord level,
-     * so we just apply the user's gain and volume.
+     * @param strategyKey Strategy identifier: "android", "highpass", "adaptive", or "custom"
+     */
+    fun setStrategy(strategyKey: String, audioRecord: AudioRecord?, sampleRate: Int) {
+        if (strategyKey == currentStrategyKey && currentStrategy != null) {
+            // Already using this strategy
+            return
+        }
+        
+        Log.d(tag, "Switching strategy: $currentStrategyKey → $strategyKey")
+        
+        // Cleanup old strategy
+        currentStrategy?.cleanup()
+        
+        // Get new strategy
+        val strategyLazy = strategies[strategyKey]
+        if (strategyLazy == null) {
+            Log.w(tag, "Unknown strategy: $strategyKey, falling back to android")
+            currentStrategyKey = "android"
+            currentStrategy = strategies["android"]?.value
+        } else {
+            currentStrategyKey = strategyKey
+            currentStrategy = strategyLazy.value
+        }
+        
+        // Setup new strategy
+        val sessionId = audioRecord?.audioSessionId ?: 0
+        val chunkSize = 4800  // 100ms at 48kHz
+        currentStrategy?.setup(sessionId, sampleRate, chunkSize)
+        
+        Log.d(tag, "Strategy switched to: ${currentStrategy?.getDisplayName()} - ${currentStrategy?.getDescription()}")
+    }
+    
+    /**
+     * Process audio using the current strategy.
+     * 
+     * CRITICAL ORDER:
+     * 1. Apply gain to amplify weak input
+     * 2. Apply filtering to remove noise from amplified signal
+     * 3. Apply volume for final output level
      */
     override fun process(inChunk: ShortArray, outChunk: ShortArray, gain: Float, volume: Float) {
         // Copy input to output
         System.arraycopy(inChunk, 0, outChunk, 0, inChunk.size)
         
-        // Android effects are applied automatically at AudioRecord level
-        // Apply additional software noise gate for better noise reduction
-        noiseGate?.process(outChunk)
+        // DEBUG: Log strategy application
+        if (currentStrategy == null) {
+            Log.w(tag, "WARNING: currentStrategy is null! No filtering will be applied!")
+        }
         
-        // Apply user's gain and volume
+        // Step 1: Apply GAIN first to amplify weak signals
         for (i in outChunk.indices) {
             val sample = outChunk[i].toInt()
-            var v = (sample * gain * volume)
+            var v = (sample * gain)
+            
+            // Clamp to prevent overflow
+            if (v > Short.MAX_VALUE) v = Short.MAX_VALUE.toFloat()
+            if (v < Short.MIN_VALUE) v = Short.MIN_VALUE.toFloat()
+            
+            outChunk[i] = v.toInt().toShort()
+        }
+        
+        // Step 2: Apply filtering to the AMPLIFIED signal (much more effective!)
+        currentStrategy?.process(outChunk)
+        
+        // Step 3: Apply volume for final output level
+        for (i in outChunk.indices) {
+            val sample = outChunk[i].toInt()
+            var v = (sample * volume)
             
             // Clamp to prevent overflow
             if (v > Short.MAX_VALUE) v = Short.MAX_VALUE.toFloat()
@@ -89,131 +118,26 @@ class LightModeProcessor : IAudioModeProcessor {
     }
     
     /**
-     * Returns description showing which Android effects are active.
-     * 
-     * Example: "LIGHT-Android[NS,AGC,AEC]+SpectralGate" means all effects are enabled.
+     * Get description of current strategy.
      */
     override fun getDescription(): String {
-        val effects = mutableListOf<String>()
-        if (noiseSuppressor?.enabled == true) effects.add("NS")
-        if (automaticGainControl?.enabled == true) effects.add("AGC")
-        if (acousticEchoCanceler?.enabled == true) effects.add("AEC")
-        val androidEffects = if (effects.isNotEmpty()) "Android[${effects.joinToString(",")}]" else "Android[none]"
-        return "LIGHT-$androidEffects+SpectralGate"
+        val strategyDesc = currentStrategy?.getDescription() ?: "NoStrategy"
+        return "LIGHT [$currentStrategyKey] $strategyDesc"
     }
     
     /**
-     * Setup Android built-in audio effects.
-     * 
-     * Attempts to enable all three effects on the audio session. If any effect
-     * is not available on the device, it will be skipped gracefully.
+     * Setup the default strategy.
      */
     override fun setup(audioRecord: AudioRecord?, sampleRate: Int) {
-        val sessionId = audioRecord?.audioSessionId ?: return
-        
-        // Enable NoiseSuppressor
-        try {
-            if (NoiseSuppressor.isAvailable()) {
-                noiseSuppressor?.release()
-                noiseSuppressor = NoiseSuppressor.create(sessionId)
-                noiseSuppressor?.enabled = true
-                Log.d(tag, "NoiseSuppressor enabled")
-            } else {
-                Log.w(tag, "NoiseSuppressor not available on this device")
-            }
-        } catch (e: Exception) {
-            Log.w(tag, "NoiseSuppressor setup failed: ${e.message}")
-        }
-        
-        // Enable AutomaticGainControl
-        try {
-            if (AutomaticGainControl.isAvailable()) {
-                automaticGainControl?.release()
-                automaticGainControl = AutomaticGainControl.create(sessionId)
-                automaticGainControl?.enabled = true
-                Log.d(tag, "AutomaticGainControl enabled")
-            } else {
-                Log.w(tag, "AutomaticGainControl not available on this device")
-            }
-        } catch (e: Exception) {
-            Log.w(tag, "AutomaticGainControl setup failed: ${e.message}")
-        }
-        
-        // Enable AcousticEchoCanceler
-        try {
-            if (AcousticEchoCanceler.isAvailable()) {
-                acousticEchoCanceler?.release()
-                acousticEchoCanceler = AcousticEchoCanceler.create(sessionId)
-                acousticEchoCanceler?.enabled = true
-                Log.d(tag, "AcousticEchoCanceler enabled")
-            } else {
-                Log.w(tag, "AcousticEchoCanceler not available on this device")
-            }
-        } catch (e: Exception) {
-            Log.w(tag, "AcousticEchoCanceler setup failed: ${e.message}")
-        }
-        
-        // Initialize software spectral noise gate (V3 - SMART ADAPTIVE)
-        try {
-            noiseGate = SpectralNoiseGate(
-                sampleRate = sampleRate,
-                noiseThresholdDb = -40f,  // Threshold for noise detection
-                reductionDb = -12f        // More aggressive: -12dB = 75% noise reduction
-            )
-            Log.d(tag, "SpectralNoiseGate V3 initialized (smart mode: -12dB reduction, 10ms attack, 200ms hold, 200ms release)")
-        } catch (e: Exception) {
-            Log.w(tag, "SpectralNoiseGate setup failed: ${e.message}")
-        }
-        
-        Log.d(tag, "LIGHT mode setup complete: ${getDescription()}")
+        setStrategy(currentStrategyKey, audioRecord, sampleRate)
     }
     
     /**
-     * Cleanup and release all Android audio effects.
-     * 
-     * This must be called when switching modes or stopping audio to prevent
-     * resource leaks.
+     * Cleanup current strategy.
      */
     override fun cleanup() {
-        // Disable and release NoiseSuppressor
-        try {
-            noiseSuppressor?.enabled = false
-            noiseSuppressor?.release()
-            noiseSuppressor = null
-            Log.d(tag, "NoiseSuppressor released")
-        } catch (e: Exception) {
-            Log.w(tag, "NoiseSuppressor cleanup failed: ${e.message}")
-        }
-        
-        // Disable and release AutomaticGainControl
-        try {
-            automaticGainControl?.enabled = false
-            automaticGainControl?.release()
-            automaticGainControl = null
-            Log.d(tag, "AutomaticGainControl released")
-        } catch (e: Exception) {
-            Log.w(tag, "AutomaticGainControl cleanup failed: ${e.message}")
-        }
-        
-        // Disable and release AcousticEchoCanceler
-        try {
-            acousticEchoCanceler?.enabled = false
-            acousticEchoCanceler?.release()
-            acousticEchoCanceler = null
-            Log.d(tag, "AcousticEchoCanceler released")
-        } catch (e: Exception) {
-            Log.w(tag, "AcousticEchoCanceler cleanup failed: ${e.message}")
-        }
-        
-        // Cleanup noise gate
-        try {
-            noiseGate?.reset()
-            noiseGate = null
-            Log.d(tag, "SpectralNoiseGate released")
-        } catch (e: Exception) {
-            Log.w(tag, "SpectralNoiseGate cleanup failed: ${e.message}")
-        }
-        
+        currentStrategy?.cleanup()
+        currentStrategy = null
         Log.d(tag, "LIGHT mode cleanup complete")
     }
 }

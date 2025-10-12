@@ -119,7 +119,7 @@ class AudioProcessor(private val context: Context) {
             }
             NoiseMode.LIGHT -> {
                 Log.d(tag, "Created LightModeProcessor")
-                LightModeProcessor()
+                LightModeProcessor(context)
             }
             NoiseMode.EXTREME -> {
                 Log.d(tag, "Created ExtremeModeProcessor")
@@ -136,6 +136,25 @@ class AudioProcessor(private val context: Context) {
         gainMultiplier = gain100x / 100.0f
         volumeMultiplier = volume100x / 100.0f
         Log.d(tag, "Updated gain=$gainMultiplier, volume=$volumeMultiplier")
+    }
+    
+    /**
+     * Set the filtering strategy for LIGHT mode.
+     * Only applies if currently in LIGHT mode.
+     * 
+     * @param strategyKey Strategy identifier: "android", "highpass", "adaptive", or "custom"
+     */
+    fun setLightModeStrategy(strategyKey: String) {
+        if (noiseMode != NoiseMode.LIGHT) {
+            Log.w(tag, "Cannot set strategy - not in LIGHT mode")
+            return
+        }
+        
+        val processor = currentProcessor
+        if (processor is LightModeProcessor) {
+            processor.setStrategy(strategyKey, audioRecord, sampleRate)
+            Log.d(tag, "LIGHT mode strategy updated: $strategyKey")
+        }
     }
 
     private fun setupAudio() {

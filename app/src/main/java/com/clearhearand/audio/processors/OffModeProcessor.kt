@@ -59,9 +59,9 @@ class OffModeProcessor : IAudioModeProcessor {
     }
     
     /**
-     * Returns "OFF-passthrough" to indicate no processing.
+     * Returns "OFF [passthrough only]" to indicate no processing.
      */
-    override fun getDescription(): String = "OFF-passthrough"
+    override fun getDescription(): String = "OFF [passthrough only]"
     
     /**
      * No setup needed for OFF mode - pure passthrough requires no initialization.
