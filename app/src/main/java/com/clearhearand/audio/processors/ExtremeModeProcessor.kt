@@ -91,13 +91,15 @@ class ExtremeModeProcessor : IAudioModeProcessor {
     /**
      * Process audio with enhanced noise reduction.
      * 
-     * Uses RNNoise (ML-based) + band-pass filter for aggressive noise suppression.
+     * Uses band-pass filter for voice isolation (RNNoise disabled for stability).
      */
     override fun process(inChunk: ShortArray, outChunk: ShortArray, gain: Float, volume: Float) {
         // Copy input to output
         System.arraycopy(inChunk, 0, outChunk, 0, inChunk.size)
         
-        // Apply RNNoise if available (ML-based noise suppression)
+        // DISABLED: RNNoise temporarily disabled due to stability issues
+        // Will re-enable after LIGHT mode is perfected
+        /*
         if (rnAvailable && rnHandle != 0L) {
             try {
                 // RNNoise expects 480 samples (10ms at 48kHz)
@@ -129,14 +131,24 @@ class ExtremeModeProcessor : IAudioModeProcessor {
                 Log.w(tag, "RNNoise processing error: ${e.message}")
             }
         }
+        */
         
-        // Apply band-pass filter (300-3400 Hz - human voice range)
-        bandPassFilter?.process(outChunk)
-        
-        // Apply user's gain and volume
+        // Step 1: Apply gain first
         for (i in outChunk.indices) {
             val sample = outChunk[i].toInt()
-            var v = (sample * gain * volume)
+            var v = (sample * gain)
+            if (v > Short.MAX_VALUE) v = Short.MAX_VALUE.toFloat()
+            if (v < Short.MIN_VALUE) v = Short.MIN_VALUE.toFloat()
+            outChunk[i] = v.toInt().toShort()
+        }
+        
+        // Step 2: Apply band-pass filter (300-3400 Hz - human voice range) to AMPLIFIED signal
+        bandPassFilter?.process(outChunk)
+        
+        // Step 3: Apply volume for final output
+        for (i in outChunk.indices) {
+            val sample = outChunk[i].toInt()
+            var v = (sample * volume)
             
             // Clamp to prevent overflow
             if (v > Short.MAX_VALUE) v = Short.MAX_VALUE.toFloat()
@@ -149,25 +161,28 @@ class ExtremeModeProcessor : IAudioModeProcessor {
     /**
      * Returns description showing active components.
      * 
-     * Example: "EXTREME-RNNoise+BandPass+Android[NS]"
+     * Example: "EXTREME-BandPass+Android[NS]" (RNNoise disabled for now)
      */
     override fun getDescription(): String {
         val active = mutableListOf<String>()
-        if (rnAvailable && rnHandle != 0L) active.add("RNNoise")
-        if (bandPassFilter != null) active.add("BandPass")
+        // RNNoise disabled for stability
+        // if (rnAvailable && rnHandle != 0L) active.add("RNNoise")
+        if (bandPassFilter != null) active.add("BandPass(300-3400Hz)")
         if (noiseSuppressor?.enabled == true) active.add("Android[NS]")
-        return "EXTREME-${active.joinToString("+")}"
+        return "EXTREME [bandpass] ${active.joinToString("+")}"
     }
     
     /**
      * Setup enhanced noise reduction components.
      * 
-     * Initializes RNNoise, band-pass filter, and Android NoiseSuppressor.
+     * Initializes band-pass filter and Android NoiseSuppressor (RNNoise disabled for now).
      */
     override fun setup(audioRecord: AudioRecord?, sampleRate: Int) {
         val sessionId = audioRecord?.audioSessionId ?: return
         
-        // Initialize RNNoise (ML-based noise suppression)
+        // DISABLED: RNNoise temporarily disabled for stability
+        // Will re-enable after LIGHT mode is perfected and debugged
+        /*
         try {
             rnHandle = RNNoise.init()
             rnAvailable = (rnHandle != 0L)
@@ -180,6 +195,8 @@ class ExtremeModeProcessor : IAudioModeProcessor {
             Log.w(tag, "RNNoise not available: ${e.message}")
             rnAvailable = false
         }
+        */
+        Log.d(tag, "RNNoise disabled (will re-enable after debugging)")
         
         // Initialize band-pass filter (300-3400 Hz for human voice)
         try {
