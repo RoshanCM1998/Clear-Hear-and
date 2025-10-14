@@ -52,6 +52,18 @@ class SpectralGate(
     private val attackCoef = exp(-chunkDurationS / (attackMs / 1000f)).toFloat()
     private val releaseCoef = exp(-chunkDurationS / (releaseMs / 1000f)).toFloat()
 
+    // Metrics for logging (public for processor to access)
+    var lastDetectedAsVoice = false
+        private set
+    var lastRms = 0.0
+        private set
+    var lastThreshold = 0.0
+        private set
+    var lastAppliedGain = 1f
+        private set
+    var isLearning = true
+        private set
+
     /**
      * Process audio through spectral gate
      */
@@ -63,15 +75,18 @@ class SpectralGate(
             sum += s * s
         }
         val rms = sqrt(sum / samples.size)
+        lastRms = rms
 
         // Learning phase: measure noise floor
         if (learningFrames < maxLearningFrames) {
             sumSquaredNoise += sum
             noiseSampleCount += samples.size
             learningFrames++
+            isLearning = true
 
             if (learningFrames == maxLearningFrames) {
                 noiseFloorRms = sqrt(sumSquaredNoise / noiseSampleCount).toFloat()
+                isLearning = false
                 android.util.Log.d(tag, "Learned noise floor: RMS=$noiseFloorRms")
             }
             return  // Pass through during learning
@@ -79,9 +94,11 @@ class SpectralGate(
 
         // Convert threshold from dB to linear
         val thresholdLinear = noiseFloorRms * 10f.pow(thresholdDb / 20f).toFloat()
+        lastThreshold = thresholdLinear.toDouble()
 
         // Detect voice vs noise
         val isVoice = rms >= thresholdLinear
+        lastDetectedAsVoice = isVoice
 
         // Update hold counter
         if (isVoice) {
@@ -105,6 +122,7 @@ class SpectralGate(
             // Release (moving towards noise reduction)
             targetGain + (currentGain - targetGain) * releaseCoef
         }
+        lastAppliedGain = currentGain
 
         // Apply gain to samples
         for (i in samples.indices) {

@@ -161,12 +161,14 @@
 - **Adaptive Gate**: 5ms attack, 100ms release, 200ms hold, -15dB reduction
 - **Custom Threshold**: 3× average noise RMS (learned from recordings)
 
-**EXTREME Mode (Multi-stage)**:
+**EXTREME Mode (Multi-stage with Compensation)**:
 - **Band-Pass**: 300-3400 Hz, 2nd order Butterworth (cascaded HP+LP)
 - **Spectral Gate**: -30dB threshold, -12dB reduction, 5ms attack, 300ms hold, 300ms release
 - **Learning**: 2 seconds (20 chunks @ 100ms), adapts to ambient noise floor
 - **Reduction**: 75% noise suppression (preserves voice volume)
-- **Gain Application**: Applied AFTER filtering for maximum hearing aid output
+- **Compensation**: 1.5x multiplier compensates for ~33% filter signal loss
+- **Gain Application**: Applied AFTER filtering WITH compensation for LOUD output
+- **Enhanced Logging**: Shows gate status (LEARN/VOICE/NOISE), RMS, threshold, gain, noise floor
 
 ---
 
@@ -257,6 +259,62 @@ NEW: Band-pass → Spectral Gate → Gain → Volume
 ```
 
 This ensures the filtered (cleaned) signal gets full amplification, resulting in **loud and clear** voice output.
+
+### EXTREME Mode Volume Boost & Enhanced Logging (2025-10-15 - Later)
+
+**Problem Identified from Log Analysis**:
+- EXTREME mode output (RMS: 0.0274) barely louder than OFF mode (RMS: 0.0270)
+- Should be 30-40% LOUDER than OFF mode for hearing aid use
+- Band-pass filter + Spectral gate caused ~33% signal loss even with gain applied after
+
+**Root Cause**:
+- Band-pass filter removes significant energy (non-voice frequencies)
+- Spectral gate further reduces signal by 75% during noise periods
+- Combined loss: ~50% total signal energy lost
+- Even though gain applied AFTER filtering, the filtered signal had less energy to amplify!
+
+**Solution Implemented - 1.5x Compensation Multiplier**:
+```kotlin
+val FILTER_COMPENSATION = 1.5f  // Compensates for ~33% filter loss
+var v = (sample * gain * FILTER_COMPENSATION)
+```
+
+**Enhanced Logging Added**:
+- **Gate Status**: LEARN (first 2s) / VOICE (speaking) / NOISE (silence/background)
+- **RMS**: Current signal energy level
+- **Threshold**: Voice detection threshold (learned from noise floor)
+- **Applied Gain**: Actual gate gain being applied (1.0 = full, 0.25 = 75% reduction)
+- **Noise Floor**: Learned ambient noise level
+
+**Example Log Output**:
+```
+EXTREME-BandPass(300-3400Hz)+Gate[VOICE rms=0.0052 thr=0.0028 gain=1.00 floor=0.0024]+AndroidNS+Comp1.5x
+```
+
+**Expected Results**:
+- ✅ EXTREME mode output should be **40-50% LOUDER** than current (RMS: 0.041 vs 0.027)
+- ✅ Comparable or louder than LIGHT mode strategies
+- ✅ Suitable for hearing aid use (LOUD and CLEAR)
+- ✅ Detailed logs show exactly what gate is doing (voice vs noise detection)
+
+**Log Analysis Recommendations**:
+1. Record first 5 seconds with ONLY noise (no speaking)
+   - This shows the learned noise floor and gate calibration
+   - All should be marked as "NOISE" with low gain (0.25)
+
+2. Then speak normally
+   - Voice chunks should be marked as "VOICE" with full gain (1.00)
+   - Background between words might show "NOISE"
+   - Sentence endings protected by 300ms hold
+
+3. Compare RMS values:
+   - OFF mode: Baseline (no processing)
+   - LIGHT modes: Should be louder than OFF
+   - EXTREME mode: Should be LOUDEST of all (with compensation)
+
+**Files Modified**:
+- `ExtremeModeProcessor.kt` - Added 1.5x compensation multiplier, enhanced getDescription()
+- `SpectralGate.kt` - Added public metrics (lastDetectedAsVoice, lastRms, lastThreshold, lastAppliedGain, isLearning)
 
 ---
 

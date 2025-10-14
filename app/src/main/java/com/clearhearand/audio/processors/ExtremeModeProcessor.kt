@@ -78,15 +78,15 @@ class ExtremeModeProcessor : IAudioModeProcessor {
     /**
      * Process audio with multi-stage voice isolation.
      *
-     * Pipeline: Band-pass (300-3400Hz) → Spectral Gate → Gain → Volume
+     * Pipeline: Band-pass (300-3400Hz) → Spectral Gate → Compensated Gain → Volume
      *
      * This ensures maximum voice clarity by:
      * 1. Removing all non-voice frequencies (300-3400 Hz band-pass)
      * 2. Suppressing background noise within voice range (spectral gate)
-     * 3. Amplifying the cleaned signal (hearing aid function)
+     * 3. Amplifying the cleaned signal with compensation for filter losses
      * 4. Final volume adjustment for output
      *
-     * NOTE: Gain is applied AFTER filtering to ensure loud, clear voice output
+     * NOTE: Gain is applied AFTER filtering with 1.5x compensation to ensure loud output
      */
     override fun process(inChunk: ShortArray, outChunk: ShortArray, gain: Float, volume: Float) {
         // Copy input to output
@@ -100,11 +100,13 @@ class ExtremeModeProcessor : IAudioModeProcessor {
         // This removes background sounds that fall within the voice frequency range
         spectralGate?.process(outChunk)
 
-        // Step 3: Apply gain amplification (hearing aid boost)
-        // IMPORTANT: Applied AFTER filtering to ensure loud output
+        // Step 3: Apply gain amplification with filter compensation
+        // COMPENSATION: 1.5x multiplier compensates for ~33% signal loss from filtering
+        // This ensures EXTREME mode is LOUDER than OFF mode, suitable for hearing aid use
+        val FILTER_COMPENSATION = 1.5f
         for (i in outChunk.indices) {
             val sample = outChunk[i].toInt()
-            var v = (sample * gain)
+            var v = (sample * gain * FILTER_COMPENSATION)
             if (v > Short.MAX_VALUE) v = Short.MAX_VALUE.toFloat()
             if (v < Short.MIN_VALUE) v = Short.MIN_VALUE.toFloat()
             outChunk[i] = v.toInt().toShort()
@@ -124,15 +126,43 @@ class ExtremeModeProcessor : IAudioModeProcessor {
     }
     
     /**
-     * Returns description showing active components.
+     * Returns description showing active components with detailed metrics.
      *
-     * Example: "EXTREME-BandPass+SpectralGate+Android[NS]"
+     * Includes spectral gate metrics for analysis:
+     * - Gate status (learning/voice/noise)
+     * - RMS levels and threshold
+     * - Applied gain
+     * - Compensation multiplier (1.5x)
+     *
+     * Example: "EXTREME-BandPass+SpectralGate[VOICE rms=0.005 thr=0.003 gain=1.0]+Comp1.5x"
      */
     override fun getDescription(): String {
         val active = mutableListOf<String>()
-        if (bandPassFilter != null) active.add("BandPass(300-3400Hz)")
-        if (spectralGate != null) active.add("SpectralGate(-12dB)")
-        if (noiseSuppressor?.enabled == true) active.add("Android[NS]")
+
+        if (bandPassFilter != null) {
+            active.add("BandPass(300-3400Hz)")
+        }
+
+        if (spectralGate != null) {
+            val gate = spectralGate!!
+            val status = when {
+                gate.isLearning -> "LEARN"
+                gate.lastDetectedAsVoice -> "VOICE"
+                else -> "NOISE"
+            }
+            val rms = "%.4f".format(gate.lastRms)
+            val thr = "%.4f".format(gate.lastThreshold)
+            val gain = "%.2f".format(gate.lastAppliedGain)
+            val noiseFloor = "%.4f".format(gate.getNoiseFloor())
+            active.add("Gate[$status rms=$rms thr=$thr gain=$gain floor=$noiseFloor]")
+        }
+
+        if (noiseSuppressor?.enabled == true) {
+            active.add("AndroidNS")
+        }
+
+        active.add("Comp1.5x")  // Compensation multiplier
+
         return "EXTREME-${active.joinToString("+")}"
     }
     
