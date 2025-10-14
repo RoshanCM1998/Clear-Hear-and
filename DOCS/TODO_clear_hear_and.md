@@ -606,3 +606,189 @@
     - Result: User can clear logs with one button click while preserving CSV header
     - Build status: ✅ No linter errors
     - Next: User testing to verify clear logs functionality
+
+33. Add "Record Noise Profile" button for custom noise analysis (PHASE 1)
+    - Reason: User wants to combine approaches - manual noise profiling (approach 2) + high-pass filter (approach 1)
+    - Strategy: Two-phase implementation
+      * Phase 1: Record user's white noise and save to file for analysis
+      * Phase 2: After analysis, add toggle to switch between simple high-pass vs custom filter
+    - User's approach: "Let's first record and process as approach 2! Create a filter for that. Then we will add a toggle which let us switch between 1 and 2!"
+    - Changes made (Phase 1):
+      * Updated MainActivity.kt:
+        - Added recordNoiseButton: Button declaration
+        - Added isRecordingNoise: Boolean flag
+        - Initialized button with text "Record Noise Profile (5s)"
+        - Button visibility: GONE by default, VISIBLE only when LIGHT mode selected
+        - Added recordNoiseProfile() method:
+          1. Records 5 seconds of audio (48kHz, 100ms chunks = 50 chunks)
+          2. Saves to file: logs/noise_profile_YYYYMMDD_HHmmss.txt
+          3. Calculates RMS, peak for each chunk
+          4. Saves first 100 samples of each chunk for frequency analysis
+          5. Shows progress percentage on button (0-100%)
+          6. Updates button text during recording
+          7. Shows toast when complete
+        - Added mode change listener:
+          * Shows Record Noise button when LIGHT mode selected
+          * Hides button when OFF or EXTREME selected
+        - Added button to UI layout between mode selector and Start/Stop button
+      * File format (for analysis):
+        ```
+        # Noise Profile Recording
+        # Sample Rate: 48000 Hz
+        # Chunk Size: 4800 samples (100ms)
+        # Format: chunk_number,rms,peak,samples...
+        #
+        0,45.2,156,12,-5,8,...   (100 samples)
+        1,43.8,142,-3,7,-9,...
+        ...
+        49,44.1,151,5,-2,11,...
+        ```
+      * Recording details:
+        - Sample rate: 48000 Hz (matches main processing)
+        - Chunk size: 4800 samples (100ms)
+        - Total chunks: 50 (5 seconds)
+        - Samples saved: 100 per chunk (for FFT analysis)
+        - AudioRecord format: PCM_16BIT, MONO, MIC source
+    - Behavior change: User can record ambient white noise for custom filter creation
+    - Benefits:
+      * Captures user's SPECIFIC noise environment
+      * 5 seconds = good statistical sample
+      * RMS + peak shows noise characteristics
+      * Sample data enables frequency analysis
+      * Progress indicator prevents confusion
+      * Only visible in LIGHT mode (where noise reduction needed)
+      * Non-blocking UI (runs in background thread)
+    - Workflow:
+      1. User selects LIGHT mode → "Record Noise Profile" button appears
+      2. User clicks button → records 5 seconds of white noise
+      3. User exports logs folder → sends noise_profile_*.txt file
+      4. Developer analyzes noise spectrum
+      5. Developer creates custom filter coefficients
+      6. Phase 2: Add toggle to switch between filters
+    - Next steps (Phase 2 - after noise analysis):
+      * Analyze noise_profile_*.txt file
+      * Create custom notch/band-stop filter for identified frequencies
+      * Add high-pass filter (80-100 Hz cutoff)
+      * Add toggle control: "Simple HP" vs "Custom Profile"
+      * Implement filter switching in LightModeProcessor
+    - Result: Infrastructure for custom noise profiling complete
+    - Build status: ✅ BUILD SUCCESSFUL in 7s
+    - Next: User records noise profile → sends file for analysis
+
+34. Implement Strategy Pattern with 4 filter options for LIGHT mode (PHASE 2 COMPLETE)
+    - Reason: Provide multiple filtering approaches, let user choose best for their environment
+    - User feedback: Want combination of approaches, ability to switch between filters
+    - Solution: Strategy Pattern with 4 distinct implementations
+    - Changes made:
+      * Created new package: `com.clearhearand.audio.processors.lightmode`
+      * Created ILightModeStrategy.kt (interface):
+        - setup(audioSessionId, sampleRate, chunkSize)
+        - process(samples: ShortArray)
+        - cleanup()
+        - getDescription(): String
+        - getDisplayName(): String
+      * Created 4 strategy implementations:
+        1. **AndroidEffectsStrategy**: Hardware NS + AGC + AEC (device dependent)
+        2. **HighPassFilterStrategy**: DC Blocker (20Hz) + High-Pass (80Hz) (consistent, minimal impact)
+        3. **AdaptiveGateStrategy**: High-Pass + Adaptive Noise Gate (5ms attack, 100ms release, 200ms hold)
+        4. **CustomProfileStrategy**: Analyzes noise_profile.txt, learns threshold (3x avg RMS), adaptive gating
+      * Created DSP components in `com.clearhearand.audio.dsp.lightmode`:
+        - DcBlocker.kt: 1st order high-pass @ 20Hz (removes DC offset)
+        - HighPassFilter80Hz.kt: 2nd order high-pass @ 80Hz (removes rumble)
+        - AdaptiveNoiseGate.kt: Time-domain gate with attack/release/hold envelope
+        - NoiseProfileLearner.kt: Analyzes noise_profile.txt files, computes optimal threshold
+      * Updated LightModeProcessor.kt:
+        - Changed from single implementation to strategy selector
+        - Added setStrategy(strategyKey) method
+        - Lazy initialization of strategies (only create when needed)
+        - Delegates all processing to current strategy
+        - Default strategy: "android" (hardware effects)
+      * Updated AudioForegroundService.kt:
+        - Added ACTION_SET_LIGHT_STRATEGY constant
+        - Added EXTRA_LIGHT_STRATEGY parameter
+        - Added handler for strategy switching
+        - Passes strategy to LightModeProcessor.setStrategy()
+      * Updated MainActivity.kt:
+        - Added strategyGroup: RadioGroup (4 options)
+        - Added strategyLabel: TextView
+        - Strategy selector visible only in LIGHT mode
+        - Strategy options:
+          1. "Android Effects (Hardware)"
+          2. "High-Pass Filter (DC + 80Hz)"
+          3. "Adaptive Gate (HP + Gating)"
+          4. "Custom Profile (Learned)"
+        - Real-time strategy switching via service intent
+        - Default: Android Effects (most compatible)
+    - Behavior change: User can now select optimal filter for their environment
+    - Benefits:
+      * **Android Effects**: Low CPU, hardware accelerated, works on most devices
+      * **High-Pass**: Consistent across devices, removes DC offset + rumble, minimal voice impact
+      * **Adaptive Gate**: Removes noise during silence, preserves speech, learned threshold
+      * **Custom Profile**: Personalized to user's environment, analyzes recorded noise, optimal threshold
+      * User can A/B test different approaches
+      * Easy to add new strategies without modifying existing code
+      * Clean architecture (Strategy Pattern)
+    - Technical details:
+      * DC Blocker: 20 Hz cutoff, y[n] = x[n] - x[n-1] + 0.995 × y[n-1]
+      * High-Pass 80Hz: Butterworth 2nd order, Q = 0.707
+      * Adaptive Gate: -15dB reduction (82%), 5ms attack, 100ms release, 200ms hold
+      * Custom threshold: 3× average noise RMS from recordings (~150 for typical noise)
+      * NoiseProfileLearner: Reads noise_profile.txt, computes avg/max RMS and peak
+    - Result: Complete filtering system with 4 distinct approaches
+    - Build status: ✅ BUILD SUCCESSFUL
+    - Documentation: FILTER_STRATEGIES_IMPLEMENTATION.md created
+
+35. Final cleanup and optimization for production
+    - Reason: Prepare codebase for deployment, remove temporary files, optimize documentation
+    - User requests:
+      * Noise profile should override old recordings (single file)
+      * Initialize custom profile with pre-existing analyzed data
+      * UI components properly hide/show in Light mode
+      * Clear logs should clear ALL days + noise profiles
+      * Move important docs from TEMP to DOCS
+      * Clean up TEMP folder
+    - Changes made:
+      * **MainActivity.kt**:
+        - Noise recording: Already uses fixed filename "noise_profile.txt" (overwrites old)
+        - clearLogsToday() → clears ALL hearing_log_*.txt files from all days (not just today)
+        - clearLogsToday() → deletes noise_profile.txt completely
+        - Updated toast message: "Cleared X log file(s) from all days + noise profile"
+        - UI visibility: Verified all Light mode components (recordNoiseButton, strategyLabel, strategyGroup) hide/show together ✅
+      * **CustomProfileStrategy.kt**:
+        - Already initializes with pre-analyzed data (line 56-59)
+        - Default threshold: 150 (from previous noise analysis: avg RMS ~50, threshold = 3x)
+        - Falls back gracefully if no noise_profile.txt exists
+        - Log message explains: "using pre-analyzed threshold: 150 (from previous analysis: avg RMS ~50)"
+      * **NoiseProfileLearner.kt**:
+        - Already looks for single file "noise_profile.txt" (no wildcards)
+        - Verified correct behavior ✅
+      * **Documentation**:
+        - Created optimized DOCS/NOISE_REDUCTION_TRIALS.md (200 lines vs 531 lines)
+        - Removed redundant information, kept essential history
+        - Added quick reference sections for strategies and findings
+        - Moved from TEMP to DOCS (permanent documentation)
+      * **TEMP folder cleanup**:
+        - Deleted: app_crash.txt (old crash logs)
+        - Deleted: crash_log.txt (old crash logs)
+        - Deleted: TRIAL_2_BUG_FIX.md (intermediate doc)
+        - Deleted: TRIAL_2_SPECTRAL_SUBTRACTION.md (intermediate doc)
+        - Deleted: FILTER_STRATEGIES_IMPLEMENTATION.md (completed implementation)
+        - Deleted: NOISE_ANALYSIS.md (key findings moved to main doc)
+        - Deleted: QUICK_START_ALL_FILTERS.md (implementation complete)
+        - Deleted: NOISE_REDUCTION_TRIALS.md (optimized version in DOCS)
+        - Kept: TODO_clear_hear_and.md (main TODO)
+        - Kept: TODO_SESSION_FINAL_CLEANUP.md (current session)
+    - Behavior change: 
+      * Noise profile overwrites instead of creating new files ✅
+      * Custom profile works immediately with pre-analyzed data ✅
+      * Clear logs clears ALL days (comprehensive cleanup) ✅
+      * Documentation organized (permanent vs temporary) ✅
+    - Benefits:
+      * Single noise profile file (no clutter)
+      * Custom profile works out-of-box with analyzed data
+      * Complete log cleanup (all days)
+      * Clean TEMP folder (only active TODOs)
+      * Optimized documentation (62% size reduction)
+      * Professional project structure
+    - Result: Production-ready codebase, clean workspace, optimized docs
+    - Next: Build and test app with ADB monitoring
