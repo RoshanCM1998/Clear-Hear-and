@@ -81,10 +81,14 @@ class MainActivity : AppCompatActivity() {
             setOnCheckedChangeListener { _, checkedId ->
                 // Update LIGHT mode controls visibility
                 val isLightMode = checkedId == light.id
-                recordNoiseButton.visibility = if (isLightMode) View.VISIBLE else View.GONE
                 strategyLabel.visibility = if (isLightMode) View.VISIBLE else View.GONE
                 strategyGroup.visibility = if (isLightMode) View.VISIBLE else View.GONE
-                
+
+                // Hide Record Noise button when not in LIGHT mode
+                if (!isLightMode) {
+                    recordNoiseButton.visibility = View.GONE
+                }
+
                 if (!isRunning) return@setOnCheckedChangeListener
                 val mode = when (checkedId) {
                     off.id -> "OFF"
@@ -105,7 +109,7 @@ class MainActivity : AppCompatActivity() {
             text = "Filter Strategy (LIGHT mode only)"
             visibility = View.VISIBLE  // Visible since LIGHT is pre-selected
         }
-        
+
         strategyGroup = RadioGroup(this).apply {
             orientation = RadioGroup.VERTICAL
             val android = RadioButton(this@MainActivity).apply {
@@ -124,16 +128,21 @@ class MainActivity : AppCompatActivity() {
                 text = "Custom Profile (Learned)"
                 id = View.generateViewId()
             }
+
             addView(android)
             addView(highpass)
             addView(adaptive)
             addView(custom)
             check(android.id)  // Default to Android effects
             visibility = View.VISIBLE  // Visible since LIGHT is pre-selected
-            
+
             setOnCheckedChangeListener { _, checkedId ->
+                // Update Record Noise button visibility when strategy changes
+                val isCustomProfile = checkedId == custom.id
+                recordNoiseButton.visibility = if (isCustomProfile) View.VISIBLE else View.GONE
+
                 if (!isRunning) return@setOnCheckedChangeListener
-                
+
                 val strategy = when (checkedId) {
                     android.id -> "android"
                     highpass.id -> "highpass"
@@ -141,7 +150,7 @@ class MainActivity : AppCompatActivity() {
                     custom.id -> "custom"
                     else -> "android"
                 }
-                
+
                 val intent = Intent(this@MainActivity, AudioForegroundService::class.java).apply {
                     action = AudioForegroundService.ACTION_SET_LIGHT_STRATEGY
                     putExtra(AudioForegroundService.EXTRA_LIGHT_STRATEGY, strategy)
@@ -159,21 +168,58 @@ class MainActivity : AppCompatActivity() {
         startStopButton = Button(this).apply {
             text = "Start"
             setOnClickListener { onStartStopClicked() }
+            // Make button 1.5x height
+            val buttonHeight = (48 * 1.5 * resources.displayMetrics.density).toInt()
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                buttonHeight
+            )
+            // Soft green color for start
+            setBackgroundColor(0xFF90EE90.toInt())  // Light green
+            setTextColor(0xFF000000.toInt())  // Black text
+        }
+
+        // Create horizontal layout for Export and Clear Logs buttons
+        val logsButtonsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
         }
 
         exportButton = Button(this).apply {
             text = "Export Logs"
             setOnClickListener { exportLogsToday() }
+            val params = LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                1f
+            )
+            params.setMargins(0, 0, 8, 0)  // 8dp right margin
+            layoutParams = params
         }
 
         clearLogsButton = Button(this).apply {
             text = "Clear Logs"
             setOnClickListener { clearLogsToday() }
+            val params = LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                1f
+            )
+            params.setMargins(8, 0, 0, 0)  // 8dp left margin
+            layoutParams = params
         }
 
+        // Add both buttons to the horizontal row
+        logsButtonsRow.addView(exportButton)
+        logsButtonsRow.addView(clearLogsButton)
+
+        // Record Noise button (shown only when LIGHT mode + Custom Profile selected)
         recordNoiseButton = Button(this).apply {
-            text = "Record Noise Profile (5s)"
-            visibility = View.VISIBLE  // Visible by default since LIGHT mode is pre-selected
+            text = "Record Noise (5s)"
+            visibility = View.GONE  // Hidden by default
             setOnClickListener { recordNoiseProfile() }
         }
 
@@ -209,7 +255,7 @@ class MainActivity : AppCompatActivity() {
             gravity = android.view.Gravity.CENTER
             setPadding(0, marginDp * 2, 0, 0)  // Extra top padding
         }
-        
+
         rootLayout.addView(gainLabel)
         rootLayout.addView(gainInput.withMarginBottom())
         rootLayout.addView(volLabel)
@@ -219,10 +265,9 @@ class MainActivity : AppCompatActivity() {
         rootLayout.addView(modeGroup.withMarginBottom())
         rootLayout.addView(strategyLabel)  // Only visible in LIGHT mode
         rootLayout.addView(strategyGroup.withMarginBottom())  // Only visible in LIGHT mode
-        rootLayout.addView(recordNoiseButton.withMarginBottom())  // Only visible in LIGHT mode
         rootLayout.addView(startStopButton.withMarginBottom())
-        rootLayout.addView(exportButton.withMarginBottom())
-        rootLayout.addView(clearLogsButton.withMarginBottom())
+        rootLayout.addView(logsButtonsRow.withMarginBottom())
+        rootLayout.addView(recordNoiseButton.withMarginBottom())  // Only visible when Custom Profile selected
         rootLayout.addView(versionFooter)
 
         setContentView(rootLayout)
@@ -256,6 +301,7 @@ class MainActivity : AppCompatActivity() {
             ContextCompat.startForegroundService(this, service)
             isRunning = true
             startStopButton.text = "Stop"
+            startStopButton.setBackgroundColor(0xFFFF6347.toInt())  // Soft tomato red
             applyParamsButton.isEnabled = true
         } else {
             val service = Intent(this, AudioForegroundService::class.java).apply {
@@ -264,6 +310,7 @@ class MainActivity : AppCompatActivity() {
             startService(service)
             isRunning = false
             startStopButton.text = "Start"
+            startStopButton.setBackgroundColor(0xFF90EE90.toInt())  // Light green
             applyParamsButton.isEnabled = false
         }
     }
@@ -287,30 +334,29 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "No logs directory found", Toast.LENGTH_SHORT).show()
             return
         }
-        
+
         try {
-            var clearedCount = 0
-            
-            // Clear ALL hearing log files from ALL days (keep headers)
+            var deletedCount = 0
+
+            // DELETE all hearing_log_*.txt files
             logsDir.listFiles { file -> file.name.startsWith("hearing_log_") && file.extension == "txt" }
                 ?.forEach { file ->
                     try {
-                        val headerLine = file.bufferedReader().use { it.readLine() }
-                        file.writeText(headerLine + "\n")
-                        clearedCount++
+                        file.delete()
+                        deletedCount++
                     } catch (e: Throwable) {
                         // Skip this file
                     }
                 }
-            
-            // Delete noise profile file completely
+
+            // DELETE noise_profile.txt file
             val noiseFile = File(logsDir, "noise_profile.txt")
             if (noiseFile.exists()) {
                 noiseFile.delete()
-                clearedCount++
+                deletedCount++
             }
-            
-            Toast.makeText(this, "Cleared $clearedCount log file(s) from all days + noise profile", Toast.LENGTH_LONG).show()
+
+            Toast.makeText(this, "Deleted $deletedCount log file(s) (hearing logs + noise profile)", Toast.LENGTH_LONG).show()
         } catch (e: Throwable) {
             Toast.makeText(this, "Clear failed: ${e.message}", Toast.LENGTH_LONG).show()
         }
