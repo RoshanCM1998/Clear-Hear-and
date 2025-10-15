@@ -34,8 +34,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var exportButton: Button
     private lateinit var clearLogsButton: Button
     private lateinit var recordNoiseButton: Button
-    private lateinit var strategyGroup: RadioGroup
-    private lateinit var strategyLabel: TextView
+    private lateinit var lightStrategyGroup: RadioGroup
+    private lateinit var lightStrategyLabel: TextView
+    private lateinit var extremeStrategyGroup: RadioGroup
+    private lateinit var extremeStrategyLabel: TextView
 
     private var isRunning: Boolean = false
     private var isRecordingNoise: Boolean = false
@@ -79,13 +81,18 @@ class MainActivity : AppCompatActivity() {
             addView(extreme)
             check(light.id)
             setOnCheckedChangeListener { _, checkedId ->
-                // Update LIGHT mode controls visibility
+                // Update strategy controls visibility based on mode
                 val isLightMode = checkedId == light.id
-                strategyLabel.visibility = if (isLightMode) View.VISIBLE else View.GONE
-                strategyGroup.visibility = if (isLightMode) View.VISIBLE else View.GONE
+                val isExtremeMode = checkedId == extreme.id
 
-                // Hide Record Noise button when not in LIGHT mode
-                if (!isLightMode) {
+                lightStrategyLabel.visibility = if (isLightMode) View.VISIBLE else View.GONE
+                lightStrategyGroup.visibility = if (isLightMode) View.VISIBLE else View.GONE
+
+                extremeStrategyLabel.visibility = if (isExtremeMode) View.VISIBLE else View.GONE
+                extremeStrategyGroup.visibility = if (isExtremeMode) View.VISIBLE else View.GONE
+
+                // Hide Record Noise button when not in appropriate mode
+                if (!isLightMode && !isExtremeMode) {
                     recordNoiseButton.visibility = View.GONE
                 }
 
@@ -105,12 +112,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Strategy selector for LIGHT mode (4 filtering options)
-        strategyLabel = TextView(this).apply {
+        lightStrategyLabel = TextView(this).apply {
             text = "Filter Strategy (LIGHT mode only)"
             visibility = View.VISIBLE  // Visible since LIGHT is pre-selected
         }
 
-        strategyGroup = RadioGroup(this).apply {
+        lightStrategyGroup = RadioGroup(this).apply {
             orientation = RadioGroup.VERTICAL
             val android = RadioButton(this@MainActivity).apply {
                 text = "Android Effects (Hardware)"
@@ -154,6 +161,47 @@ class MainActivity : AppCompatActivity() {
                 val intent = Intent(this@MainActivity, AudioForegroundService::class.java).apply {
                     action = AudioForegroundService.ACTION_SET_LIGHT_STRATEGY
                     putExtra(AudioForegroundService.EXTRA_LIGHT_STRATEGY, strategy)
+                }
+                startService(intent)
+            }
+        }
+
+        // Strategy selector for EXTREME mode (2 voice isolation options)
+        extremeStrategyLabel = TextView(this).apply {
+            text = "Voice Isolation Strategy (EXTREME mode only)"
+            visibility = View.GONE  // Hidden since LIGHT is pre-selected
+        }
+
+        extremeStrategyGroup = RadioGroup(this).apply {
+            orientation = RadioGroup.VERTICAL
+            val spectral = RadioButton(this@MainActivity).apply {
+                text = "Spectral Gate (Manual)"
+                id = View.generateViewId()
+            }
+            val rnnoise = RadioButton(this@MainActivity).apply {
+                text = "RNNoise (ML) - STUB"
+                id = View.generateViewId()
+            }
+
+            addView(spectral)
+            addView(rnnoise)
+            check(spectral.id)  // Default to Spectral Gate
+            visibility = View.GONE  // Hidden since LIGHT is pre-selected
+
+            setOnCheckedChangeListener { _, checkedId ->
+                // TODO: Update Record Noise button visibility when we implement noise profile pre-recording
+
+                if (!isRunning) return@setOnCheckedChangeListener
+
+                val strategy = when (checkedId) {
+                    spectral.id -> "spectral"
+                    rnnoise.id -> "rnnoise"
+                    else -> "spectral"
+                }
+
+                val intent = Intent(this@MainActivity, AudioForegroundService::class.java).apply {
+                    action = AudioForegroundService.ACTION_SET_EXTREME_STRATEGY
+                    putExtra(AudioForegroundService.EXTRA_EXTREME_STRATEGY, strategy)
                 }
                 startService(intent)
             }
@@ -263,8 +311,10 @@ class MainActivity : AppCompatActivity() {
         rootLayout.addView(applyParamsButton.withMarginBottom())
         rootLayout.addView(modeLabel)
         rootLayout.addView(modeGroup.withMarginBottom())
-        rootLayout.addView(strategyLabel)  // Only visible in LIGHT mode
-        rootLayout.addView(strategyGroup.withMarginBottom())  // Only visible in LIGHT mode
+        rootLayout.addView(lightStrategyLabel)  // Only visible in LIGHT mode
+        rootLayout.addView(lightStrategyGroup.withMarginBottom())  // Only visible in LIGHT mode
+        rootLayout.addView(extremeStrategyLabel)  // Only visible in EXTREME mode
+        rootLayout.addView(extremeStrategyGroup.withMarginBottom())  // Only visible in EXTREME mode
         rootLayout.addView(startStopButton.withMarginBottom())
         rootLayout.addView(logsButtonsRow.withMarginBottom())
         rootLayout.addView(recordNoiseButton.withMarginBottom())  // Only visible when Custom Profile selected

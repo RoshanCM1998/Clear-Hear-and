@@ -25,7 +25,8 @@ class SpectralGate(
     private val reductionDb: Float = -12f,      // Noise reduction amount (75%)
     private val attackMs: Float = 5f,           // Fast attack for speech
     private val holdMs: Float = 300f,           // Long hold for sentence endings
-    private val releaseMs: Float = 300f         // Smooth release
+    private val releaseMs: Float = 300f,        // Smooth release
+    private val preloadedNoiseFloor: Float? = null  // Pre-recorded noise floor (skips learning)
 ) {
     private val tag = "SpectralGate"
 
@@ -64,6 +65,16 @@ class SpectralGate(
     var isLearning = true
         private set
 
+    init {
+        // If preloaded noise floor provided, skip learning phase
+        if (preloadedNoiseFloor != null) {
+            noiseFloorRms = preloadedNoiseFloor
+            learningFrames = maxLearningFrames  // Skip learning
+            isLearning = false
+            android.util.Log.d(tag, "Using preloaded noise floor: RMS=$noiseFloorRms (SAVED)")
+        }
+    }
+
     /**
      * Process audio through spectral gate
      */
@@ -93,7 +104,9 @@ class SpectralGate(
         }
 
         // Convert threshold from dB to linear
-        val thresholdLinear = noiseFloorRms * 10f.pow(thresholdDb / 20f).toFloat()
+        // FIXED BUG: Was using 10^(-30/20) = 0.0316x (too low!)
+        // Now using simple 3.0x multiplier (voice is ~3x louder than noise floor)
+        val thresholdLinear = noiseFloorRms * 3.0f
         lastThreshold = thresholdLinear.toDouble()
 
         // Detect voice vs noise

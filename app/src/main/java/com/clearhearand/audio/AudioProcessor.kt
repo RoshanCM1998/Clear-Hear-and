@@ -123,7 +123,7 @@ class AudioProcessor(private val context: Context) {
             }
             NoiseMode.EXTREME -> {
                 Log.d(tag, "Created ExtremeModeProcessor")
-                ExtremeModeProcessor()
+                ExtremeModeProcessor(context)
             }
         }
         
@@ -141,7 +141,7 @@ class AudioProcessor(private val context: Context) {
     /**
      * Set the filtering strategy for LIGHT mode.
      * Only applies if currently in LIGHT mode.
-     * 
+     *
      * @param strategyKey Strategy identifier: "android", "highpass", "adaptive", or "custom"
      */
     fun setLightModeStrategy(strategyKey: String) {
@@ -149,11 +149,30 @@ class AudioProcessor(private val context: Context) {
             Log.w(tag, "Cannot set strategy - not in LIGHT mode")
             return
         }
-        
+
         val processor = currentProcessor
         if (processor is LightModeProcessor) {
             processor.setStrategy(strategyKey, audioRecord, sampleRate)
             Log.d(tag, "LIGHT mode strategy updated: $strategyKey")
+        }
+    }
+
+    /**
+     * Set the voice isolation strategy for EXTREME mode.
+     * Only applies if currently in EXTREME mode.
+     *
+     * @param strategyKey Strategy identifier: "spectral" or "rnnoise"
+     */
+    fun setExtremeModeStrategy(strategyKey: String) {
+        if (noiseMode != NoiseMode.EXTREME) {
+            Log.w(tag, "Cannot set strategy - not in EXTREME mode")
+            return
+        }
+
+        val processor = currentProcessor
+        if (processor is ExtremeModeProcessor) {
+            processor.setStrategy(strategyKey, audioRecord, sampleRate)
+            Log.d(tag, "EXTREME mode strategy updated: $strategyKey")
         }
     }
 
