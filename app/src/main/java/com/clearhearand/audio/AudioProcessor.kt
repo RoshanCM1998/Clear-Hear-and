@@ -8,7 +8,7 @@ import com.clearhearand.audio.processors.IAudioModeProcessor
 import com.clearhearand.audio.processors.ExtremeModeProcessor
 import com.clearhearand.audio.processors.LightModeProcessor
 import com.clearhearand.audio.processors.OffModeProcessor
-import com.example.audio.RNNoise
+import com.clearhearand.audio.RNNoise
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean

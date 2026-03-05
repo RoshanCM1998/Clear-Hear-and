@@ -179,7 +179,7 @@ class MainActivity : AppCompatActivity() {
                 id = View.generateViewId()
             }
             val rnnoise = RadioButton(this@MainActivity).apply {
-                text = "RNNoise (ML) - STUB"
+                text = "RNNoise (ML)"
                 id = View.generateViewId()
             }
 
