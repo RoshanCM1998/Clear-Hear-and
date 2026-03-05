@@ -8,7 +8,6 @@ import com.clearhearand.audio.processors.IAudioModeProcessor
 import com.clearhearand.audio.processors.ExtremeModeProcessor
 import com.clearhearand.audio.processors.LightModeProcessor
 import com.clearhearand.audio.processors.OffModeProcessor
-import com.example.audio.RNNoise
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -48,9 +47,6 @@ class AudioProcessor(private val context: Context) {
     @Volatile private var gainMultiplier: Float = 1.0f
     @Volatile private var volumeMultiplier: Float = 1.0f
 
-    // RNNoise handle (for future use in EXTREME mode if needed)
-    private var rnHandle: Long = 0L
-
     // Audio format - KEEP at 48kHz and 100ms for original quality
     private val sampleRate = 48000  // Restored to match old code for better quality or 16000
     private val channelIn = AudioFormat.CHANNEL_IN_MONO
@@ -86,10 +82,6 @@ class AudioProcessor(private val context: Context) {
         audioRecord?.release(); audioRecord = null
         audioTrack?.release(); audioTrack = null
         queue.clear()
-        if (rnHandle != 0L) {
-            try { RNNoise.release(rnHandle) } catch (_: Throwable) {}
-            rnHandle = 0L
-        }
         logger?.close(); logger = null
     }
 
@@ -123,7 +115,7 @@ class AudioProcessor(private val context: Context) {
             }
             NoiseMode.EXTREME -> {
                 Log.d(tag, "Created ExtremeModeProcessor")
-                ExtremeModeProcessor()
+                ExtremeModeProcessor(context)
             }
         }
         
