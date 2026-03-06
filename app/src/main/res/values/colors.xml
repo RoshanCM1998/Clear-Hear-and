@@ -29,4 +29,7 @@
     <color name="md_on_surface">#E0E0E0</color>
     <color name="md_surface_variant">#1E1E1E</color>
     <color name="md_on_surface_variant">#C0C0C0</color>
+
+    <!-- Launcher icon background -->
+    <color name="ic_launcher_background">#2B2B2B</color>
 </resources>
