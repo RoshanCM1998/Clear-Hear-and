@@ -20,6 +20,8 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.inputmethod.InputMethodManager
+import android.graphics.Rect
 import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -253,8 +255,8 @@ class MainActivity : AppCompatActivity() {
         }
 
         // ── Load saved values from active profile ──
-        val savedGain = prefs.getInt("last_gain", prefs.getInt("profile_${activeProfile}_gain", 100)).toFloat()
-        val savedVolume = prefs.getInt("last_volume", prefs.getInt("profile_${activeProfile}_volume", 100)).toFloat()
+        val savedGain = prefs.getInt("last_gain", prefs.getInt("profile_${activeProfile}_gain", 100)).toFloat().coerceIn(0f, 500f)
+        val savedVolume = prefs.getInt("last_volume", prefs.getInt("profile_${activeProfile}_volume", 100)).toFloat().coerceIn(0f, 500f)
 
         // Migrate old EQ keys and load dual-mode bands
         migrateEqKeys()
@@ -284,10 +286,15 @@ class MainActivity : AppCompatActivity() {
             override fun afterTextChanged(s: android.text.Editable?) {
                 if (updatingGainFromSlider) return
                 val v = s?.toString()?.toFloatOrNull() ?: return
-                if (v in 0f..500f) {
-                    gainSlider.value = v
-                    autoApplyParams()
+                val clamped = v.coerceIn(0f, 500f)
+                gainSlider.value = clamped
+                if (clamped != v) {
+                    updatingGainFromSlider = true
+                    gainValueInput.setText(clamped.toInt().toString())
+                    gainValueInput.setSelection(gainValueInput.text?.length ?: 0)
+                    updatingGainFromSlider = false
                 }
+                autoApplyParams()
             }
         })
 
@@ -317,10 +324,15 @@ class MainActivity : AppCompatActivity() {
             override fun afterTextChanged(s: android.text.Editable?) {
                 if (updatingVolumeFromSlider) return
                 val v = s?.toString()?.toFloatOrNull() ?: return
-                if (v in 0f..500f) {
-                    volumeSlider.value = v
-                    autoApplyParams()
+                val clamped = v.coerceIn(0f, 500f)
+                volumeSlider.value = clamped
+                if (clamped != v) {
+                    updatingVolumeFromSlider = true
+                    volumeValueInput.setText(clamped.toInt().toString())
+                    volumeValueInput.setSelection(volumeValueInput.text?.length ?: 0)
+                    updatingVolumeFromSlider = false
                 }
+                autoApplyParams()
             }
         })
 
@@ -664,7 +676,6 @@ class MainActivity : AppCompatActivity() {
                     val v = s?.toString()?.toFloatOrNull() ?: return
                     val slider = eqSliders[bandIndex] ?: return
                     val clamped = v.coerceIn(slider.valueFrom, slider.valueTo)
-                    // Snap to step
                     val step = slider.stepSize
                     val snapped = if (step > 0) (Math.round(clamped / step) * step) else clamped
                     if (eqModeMultiplier) {
@@ -672,25 +683,17 @@ class MainActivity : AppCompatActivity() {
                     } else {
                         eqAdditiveBands[bandIndex] = snapped
                     }
-                    if (snapped in slider.valueFrom..slider.valueTo) {
-                        slider.value = snapped
+                    slider.value = snapped
+                    if (snapped != v) {
+                        updatingEqFromSlider[bandIndex] = true
+                        valInput.setText(formatEqValue(snapped))
+                        valInput.setSelection(valInput.text?.length ?: 0)
+                        updatingEqFromSlider[bandIndex] = false
                     }
                     saveEqToProfile()
                     autoApplyEq()
                 }
             })
-            valInput.setOnFocusChangeListener { _, hasFocus ->
-                if (!hasFocus) {
-                    val slider = eqSliders[bandIndex] ?: return@setOnFocusChangeListener
-                    val v = valInput.text.toString().toFloatOrNull() ?: slider.valueFrom
-                    val clamped = v.coerceIn(slider.valueFrom, slider.valueTo)
-                    val step = slider.stepSize
-                    val snapped = if (step > 0) (Math.round(clamped / step) * step) else clamped
-                    updatingEqFromSlider[bandIndex] = true
-                    valInput.setText(formatEqValue(snapped))
-                    updatingEqFromSlider[bandIndex] = false
-                }
-            }
             eqInputs[i] = valInput
 
             // Vertical slider: rotation on Slider, touch listener prevents ScrollView interception
@@ -980,12 +983,12 @@ class MainActivity : AppCompatActivity() {
     private fun loadProfile(profile: Int) {
         updatingFromProfile = true
 
-        val gain = prefs.getInt("profile_${profile}_gain", 100).toFloat()
-        val volume = prefs.getInt("profile_${profile}_volume", 100).toFloat()
+        val gain = prefs.getInt("profile_${profile}_gain", 100).toFloat().coerceIn(0f, 500f)
+        val volume = prefs.getInt("profile_${profile}_volume", 100).toFloat().coerceIn(0f, 500f)
 
-        gainSlider.value = gain.coerceIn(0f, 500f)
+        gainSlider.value = gain
         gainValueInput.setText(gain.toInt().toString())
-        volumeSlider.value = volume.coerceIn(0f, 500f)
+        volumeSlider.value = volume
         volumeValueInput.setText(volume.toInt().toString())
 
         // Load EQ state
@@ -1318,5 +1321,21 @@ class MainActivity : AppCompatActivity() {
             perms.add(Manifest.permission.BLUETOOTH_CONNECT)
         }
         requestPermission.launch(perms.toTypedArray())
+    }
+
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.action == MotionEvent.ACTION_DOWN) {
+            val v = currentFocus
+            if (v is android.widget.EditText) {
+                val outRect = Rect()
+                v.getGlobalVisibleRect(outRect)
+                if (!outRect.contains(ev.rawX.toInt(), ev.rawY.toInt())) {
+                    v.clearFocus()
+                    val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
+                    imm.hideSoftInputFromWindow(v.windowToken, 0)
+                }
+            }
+        }
+        return super.dispatchTouchEvent(ev)
     }
 }
