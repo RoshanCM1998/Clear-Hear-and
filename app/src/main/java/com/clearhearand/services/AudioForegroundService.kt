@@ -27,6 +27,8 @@ class AudioForegroundService : Service() {
         const val ACTION_SET_POST_FILTER = "com.clearhearand.action.SET_POST_FILTER"
         const val ACTION_SET_EQ_BANDS = "com.clearhearand.action.SET_EQ_BANDS"
         const val ACTION_SET_EQ_MODE = "com.clearhearand.action.SET_EQ_MODE"
+        const val ACTION_SET_INPUT_DEVICE = "com.clearhearand.action.SET_INPUT_DEVICE"
+        const val ACTION_SET_OUTPUT_DEVICE = "com.clearhearand.action.SET_OUTPUT_DEVICE"
 
         const val EXTRA_GAIN_100X = "extra_gain_100x"
         const val EXTRA_VOL_100X = "extra_vol_100x"
@@ -35,6 +37,9 @@ class AudioForegroundService : Service() {
         const val EXTRA_POST_FILTER_ENABLED = "extra_post_filter_enabled"
         const val EXTRA_EQ_BANDS = "extra_eq_bands" // FloatArray(6)
         const val EXTRA_EQ_MODE_MULTIPLIER = "extra_eq_mode_multiplier" // Boolean
+        const val EXTRA_DEVICE_ID = "extra_device_id" // Int, -1 = system default
+        const val EXTRA_INPUT_DEVICE_ID = "extra_input_device_id"
+        const val EXTRA_OUTPUT_DEVICE_ID = "extra_output_device_id"
 
         private const val NOTIF_CHANNEL_ID = "clear_hear_and_channel"
         private const val NOTIF_ID = 101
@@ -65,6 +70,10 @@ class AudioForegroundService : Service() {
                 val eqModeMultiplier = intent.getBooleanExtra(EXTRA_EQ_MODE_MULTIPLIER, false)
                 val mode = runCatching { NoiseMode.valueOf(modeStr) }.getOrDefault(NoiseMode.OFF)
                 startForeground(NOTIF_ID, buildNotification("Running: $mode"))
+                val inputDeviceId = intent.getIntExtra(EXTRA_INPUT_DEVICE_ID, -1)
+                val outputDeviceId = intent.getIntExtra(EXTRA_OUTPUT_DEVICE_ID, -1)
+                if (inputDeviceId >= 0) processor?.setInputDevice(inputDeviceId)
+                if (outputDeviceId >= 0) processor?.setOutputDevice(outputDeviceId)
                 processor?.setEqMode(eqModeMultiplier)
                 processor?.start(mode, gain100, vol100, postFilter)
                 if (eqBands != null && eqBands.size == 6) {
@@ -104,6 +113,16 @@ class AudioForegroundService : Service() {
                 val isMultiplier = intent.getBooleanExtra(EXTRA_EQ_MODE_MULTIPLIER, false)
                 debugLog("EQ mode: ${if (isMultiplier) "Multiplier" else "Additive"}")
                 processor?.setEqMode(isMultiplier)
+            }
+            ACTION_SET_INPUT_DEVICE -> {
+                val deviceId = intent.getIntExtra(EXTRA_DEVICE_ID, -1)
+                debugLog("Input device: $deviceId")
+                processor?.setInputDevice(if (deviceId >= 0) deviceId else null)
+            }
+            ACTION_SET_OUTPUT_DEVICE -> {
+                val deviceId = intent.getIntExtra(EXTRA_DEVICE_ID, -1)
+                debugLog("Output device: $deviceId")
+                processor?.setOutputDevice(if (deviceId >= 0) deviceId else null)
             }
             ACTION_STOP -> {
                 processor?.stop()

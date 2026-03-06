@@ -9,10 +9,15 @@ import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.provider.MediaStore
 import android.text.InputFilter
 import android.text.InputType
@@ -71,6 +76,13 @@ class MainActivity : AppCompatActivity() {
     private var isRecordingNoise: Boolean = false
     private var updatingGainFromSlider = false
     private var updatingVolumeFromSlider = false
+
+    // Audio device selection
+    private lateinit var micButton: MaterialButton
+    private lateinit var speakerButton: MaterialButton
+    private var selectedInputDeviceId: Int = -1   // -1 = system default
+    private var selectedOutputDeviceId: Int = -1
+    private var audioDeviceCallback: AudioDeviceCallback? = null
 
     // Profiles & EQ
     private lateinit var prefs: SharedPreferences
@@ -870,7 +882,47 @@ class MainActivity : AppCompatActivity() {
         scrollView.addView(contentLayout)
         root.addView(scrollView)
 
-        // ── Floating Start/Stop Button ──
+        // ── Bottom button bar: [Mic] [Start/Stop] [Speaker] ──
+        val bottomBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            val barParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            )
+            barParams.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            barParams.setMargins(dp(16), 0, dp(16), dp(24))
+            layoutParams = barParams
+            elevation = dpf(8)
+        }
+
+        // Load saved device preferences
+        selectedInputDeviceId = prefs.getInt("selected_input_device", -1)
+        selectedOutputDeviceId = prefs.getInt("selected_output_device", -1)
+
+        // Mic button (left)
+        micButton = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            val btnSize = dp(56)
+            val btnParams = LinearLayout.LayoutParams(btnSize, btnSize)
+            btnParams.setMargins(0, 0, dp(12), 0)
+            layoutParams = btnParams
+            iconSize = dp(24)
+            iconGravity = MaterialButton.ICON_GRAVITY_TEXT_START
+            iconPadding = 0
+            setPadding(0, 0, 0, 0)
+            insetTop = 0
+            insetBottom = 0
+            text = ""
+            cornerRadius = dp(28)
+            backgroundTintList = ColorStateList.valueOf(surfaceCard)
+            strokeColor = ColorStateList.valueOf(accentTeal)
+            strokeWidth = (1.5f * density).toInt()
+            iconTint = ColorStateList.valueOf(accentTeal)
+            setOnClickListener { showInputDevicePopup(it) }
+        }
+        updateMicButtonIcon()
+
+        // Start/Stop button (center)
         startStopFab = MaterialButton(this).apply {
             text = "Start"
             setTextColor(Color.WHITE)
@@ -878,27 +930,50 @@ class MainActivity : AppCompatActivity() {
             typeface = android.graphics.Typeface.DEFAULT_BOLD
             backgroundTintList = ColorStateList.valueOf(startGreen)
             cornerRadius = dp(36)
-            elevation = dpf(8)
             val size = dp(72)
-            val fabParams = FrameLayout.LayoutParams(dp(200), size)
-            fabParams.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-            fabParams.setMargins(0, 0, 0, dp(24))
+            val fabParams = LinearLayout.LayoutParams(0, size, 1f)
             layoutParams = fabParams
             insetTop = 0
             insetBottom = 0
             setOnClickListener { onStartStopClicked() }
         }
 
-        // Apply bottom inset to FAB
-        ViewCompat.setOnApplyWindowInsetsListener(startStopFab) { v, insets ->
+        // Speaker button (right)
+        speakerButton = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            val btnSize = dp(56)
+            val btnParams = LinearLayout.LayoutParams(btnSize, btnSize)
+            btnParams.setMargins(dp(12), 0, 0, 0)
+            layoutParams = btnParams
+            iconSize = dp(24)
+            iconGravity = MaterialButton.ICON_GRAVITY_TEXT_START
+            iconPadding = 0
+            setPadding(0, 0, 0, 0)
+            insetTop = 0
+            insetBottom = 0
+            text = ""
+            cornerRadius = dp(28)
+            backgroundTintList = ColorStateList.valueOf(surfaceCard)
+            strokeColor = ColorStateList.valueOf(accentTeal)
+            strokeWidth = (1.5f * density).toInt()
+            iconTint = ColorStateList.valueOf(accentTeal)
+            setOnClickListener { showOutputDevicePopup(it) }
+        }
+        updateSpeakerButtonIcon()
+
+        bottomBar.addView(micButton)
+        bottomBar.addView(startStopFab)
+        bottomBar.addView(speakerButton)
+
+        // Apply bottom inset to bottom bar
+        ViewCompat.setOnApplyWindowInsetsListener(bottomBar) { v, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            val fabParams = v.layoutParams as FrameLayout.LayoutParams
-            fabParams.setMargins(0, 0, 0, dp(24) + systemBars.bottom)
-            v.layoutParams = fabParams
+            val barParams = v.layoutParams as FrameLayout.LayoutParams
+            barParams.setMargins(dp(16), 0, dp(16), dp(24) + systemBars.bottom)
+            v.layoutParams = barParams
             insets
         }
 
-        root.addView(startStopFab)
+        root.addView(bottomBar)
 
         setContentView(root)
     }
@@ -925,6 +1000,8 @@ class MainActivity : AppCompatActivity() {
                 putExtra(AudioForegroundService.EXTRA_POST_FILTER_ENABLED, postFilterSwitch.isChecked)
                 putExtra(AudioForegroundService.EXTRA_EQ_MODE_MULTIPLIER, eqModeMultiplier)
                 putExtra(AudioForegroundService.EXTRA_EQ_BANDS, currentEqBands().clone())
+                putExtra(AudioForegroundService.EXTRA_INPUT_DEVICE_ID, selectedInputDeviceId)
+                putExtra(AudioForegroundService.EXTRA_OUTPUT_DEVICE_ID, selectedOutputDeviceId)
             }
             ContextCompat.startForegroundService(this, service)
             isRunning = true
@@ -1347,6 +1424,204 @@ class MainActivity : AppCompatActivity() {
             perms.add(Manifest.permission.BLUETOOTH_CONNECT)
         }
         requestPermission.launch(perms.toTypedArray())
+    }
+
+    // ── Audio Device Selection ──
+
+    private fun showInputDevicePopup(anchor: View) {
+        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val devices = am.getDevices(AudioManager.GET_DEVICES_INPUTS)
+        val popup = PopupMenu(this, anchor, Gravity.TOP)
+
+        popup.menu.add(0, -1, 0, "Default (System)")
+        for (device in devices) {
+            popup.menu.add(0, device.id, 0, getDeviceDisplayName(device))
+        }
+
+        // Check current selection
+        popup.menu.findItem(selectedInputDeviceId)?.isChecked = true
+
+        popup.setOnMenuItemClickListener { item ->
+            selectedInputDeviceId = item.itemId
+            prefs.edit().putInt("selected_input_device", selectedInputDeviceId).apply()
+            updateMicButtonIcon()
+            if (isRunning) {
+                val intent = Intent(this, AudioForegroundService::class.java).apply {
+                    action = AudioForegroundService.ACTION_SET_INPUT_DEVICE
+                    putExtra(AudioForegroundService.EXTRA_DEVICE_ID, selectedInputDeviceId)
+                }
+                startService(intent)
+            }
+            true
+        }
+        popup.show()
+    }
+
+    private fun showOutputDevicePopup(anchor: View) {
+        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val devices = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+        val popup = PopupMenu(this, anchor, Gravity.TOP)
+
+        popup.menu.add(0, -1, 0, "Default (System)")
+        for (device in devices) {
+            popup.menu.add(0, device.id, 0, getDeviceDisplayName(device))
+        }
+
+        popup.menu.findItem(selectedOutputDeviceId)?.isChecked = true
+
+        popup.setOnMenuItemClickListener { item ->
+            selectedOutputDeviceId = item.itemId
+            prefs.edit().putInt("selected_output_device", selectedOutputDeviceId).apply()
+            updateSpeakerButtonIcon()
+            if (isRunning) {
+                val intent = Intent(this, AudioForegroundService::class.java).apply {
+                    action = AudioForegroundService.ACTION_SET_OUTPUT_DEVICE
+                    putExtra(AudioForegroundService.EXTRA_DEVICE_ID, selectedOutputDeviceId)
+                }
+                startService(intent)
+            }
+            true
+        }
+        popup.show()
+    }
+
+    private fun getDeviceDisplayName(device: AudioDeviceInfo): String {
+        val name = device.productName?.toString()?.takeIf { it.isNotBlank() } ?: ""
+        val typeName = getDeviceTypeName(device.type)
+        return if (name.isNotEmpty() && name != typeName) "$name ($typeName)" else typeName
+    }
+
+    private fun getDeviceTypeName(type: Int): String = when (type) {
+        AudioDeviceInfo.TYPE_BUILTIN_MIC -> "Built-in Mic"
+        AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "Built-in Speaker"
+        AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> "Earpiece"
+        AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "Bluetooth SCO"
+        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "Bluetooth A2DP"
+        AudioDeviceInfo.TYPE_WIRED_HEADSET -> "Wired Headset"
+        AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "Wired Headphones"
+        AudioDeviceInfo.TYPE_USB_DEVICE -> "USB Device"
+        AudioDeviceInfo.TYPE_USB_ACCESSORY -> "USB Accessory"
+        AudioDeviceInfo.TYPE_USB_HEADSET -> "USB Headset"
+        AudioDeviceInfo.TYPE_TELEPHONY -> "Telephony"
+        AudioDeviceInfo.TYPE_HDMI -> "HDMI"
+        AudioDeviceInfo.TYPE_AUX_LINE -> "AUX Line"
+        else -> {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && type == AudioDeviceInfo.TYPE_BLE_HEADSET) {
+                "BLE Headset"
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && type == AudioDeviceInfo.TYPE_BLE_SPEAKER) {
+                "BLE Speaker"
+            } else {
+                "Audio Device"
+            }
+        }
+    }
+
+    private fun getIconResForDeviceType(type: Int, isInput: Boolean): Int {
+        return when (type) {
+            AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+            AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> R.drawable.ic_bluetooth
+            AudioDeviceInfo.TYPE_WIRED_HEADSET -> R.drawable.ic_headset_mic
+            AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> R.drawable.ic_headphones
+            AudioDeviceInfo.TYPE_USB_DEVICE,
+            AudioDeviceInfo.TYPE_USB_ACCESSORY,
+            AudioDeviceInfo.TYPE_USB_HEADSET -> R.drawable.ic_usb
+            else -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                    (type == AudioDeviceInfo.TYPE_BLE_HEADSET || type == AudioDeviceInfo.TYPE_BLE_SPEAKER)) {
+                    R.drawable.ic_bluetooth
+                } else {
+                    if (isInput) R.drawable.ic_mic else R.drawable.ic_volume_up
+                }
+            }
+        }
+    }
+
+    private fun updateMicButtonIcon() {
+        val iconRes = if (selectedInputDeviceId < 0) {
+            R.drawable.ic_mic
+        } else {
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val device = am.getDevices(AudioManager.GET_DEVICES_INPUTS).firstOrNull { it.id == selectedInputDeviceId }
+            if (device != null) {
+                getIconResForDeviceType(device.type, isInput = true)
+            } else {
+                // Saved device no longer available, reset to default
+                selectedInputDeviceId = -1
+                prefs.edit().putInt("selected_input_device", -1).apply()
+                R.drawable.ic_mic
+            }
+        }
+        micButton.setIconResource(iconRes)
+    }
+
+    private fun updateSpeakerButtonIcon() {
+        val iconRes = if (selectedOutputDeviceId < 0) {
+            R.drawable.ic_volume_up
+        } else {
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val device = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).firstOrNull { it.id == selectedOutputDeviceId }
+            if (device != null) {
+                getIconResForDeviceType(device.type, isInput = false)
+            } else {
+                selectedOutputDeviceId = -1
+                prefs.edit().putInt("selected_output_device", -1).apply()
+                R.drawable.ic_volume_up
+            }
+        }
+        speakerButton.setIconResource(iconRes)
+    }
+
+    private fun registerAudioDeviceCallback() {
+        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        audioDeviceCallback = object : AudioDeviceCallback() {
+            override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) {
+                updateMicButtonIcon()
+                updateSpeakerButtonIcon()
+            }
+
+            override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) {
+                // Check if selected devices were removed
+                updateMicButtonIcon()
+                updateSpeakerButtonIcon()
+                // If running and selected device was removed, notify service to fall back
+                if (isRunning) {
+                    if (selectedInputDeviceId < 0) {
+                        val intent = Intent(this@MainActivity, AudioForegroundService::class.java).apply {
+                            action = AudioForegroundService.ACTION_SET_INPUT_DEVICE
+                            putExtra(AudioForegroundService.EXTRA_DEVICE_ID, -1)
+                        }
+                        startService(intent)
+                    }
+                    if (selectedOutputDeviceId < 0) {
+                        val intent = Intent(this@MainActivity, AudioForegroundService::class.java).apply {
+                            action = AudioForegroundService.ACTION_SET_OUTPUT_DEVICE
+                            putExtra(AudioForegroundService.EXTRA_DEVICE_ID, -1)
+                        }
+                        startService(intent)
+                    }
+                }
+            }
+        }
+        am.registerAudioDeviceCallback(audioDeviceCallback, Handler(Looper.getMainLooper()))
+    }
+
+    private fun unregisterAudioDeviceCallback() {
+        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        audioDeviceCallback?.let { am.unregisterAudioDeviceCallback(it) }
+        audioDeviceCallback = null
+    }
+
+    override fun onResume() {
+        super.onResume()
+        registerAudioDeviceCallback()
+        // Refresh icons in case devices changed while paused
+        updateMicButtonIcon()
+        updateSpeakerButtonIcon()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        unregisterAudioDeviceCallback()
     }
 
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {

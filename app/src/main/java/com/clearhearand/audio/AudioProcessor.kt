@@ -2,6 +2,7 @@ package com.clearhearand.audio
 
 import android.content.Context
 import android.media.*
+import android.media.AudioDeviceInfo
 import android.util.Log
 import com.clearhearand.audio.dsp.eq.AdditiveEqualizer
 import com.clearhearand.audio.dsp.eq.IEqualizer
@@ -51,6 +52,10 @@ class AudioProcessor(private val context: Context) {
 
     @Volatile private var gainMultiplier: Float = 1.0f
     @Volatile private var volumeMultiplier: Float = 1.0f
+
+    // Preferred audio devices (null = system default)
+    @Volatile private var preferredInputDeviceId: Int? = null
+    @Volatile private var preferredOutputDeviceId: Int? = null
 
     // Audio format - KEEP at 48kHz and 100ms for original quality
     private val sampleRate = 48000
@@ -176,6 +181,26 @@ class AudioProcessor(private val context: Context) {
         Log.d(tag, "EQ mode switched to ${if (isMultiplier) "Multiplier" else "Additive"}")
     }
 
+    fun setInputDevice(deviceId: Int?) {
+        preferredInputDeviceId = deviceId
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val deviceInfo = if (deviceId != null) {
+            am.getDevices(AudioManager.GET_DEVICES_INPUTS).firstOrNull { it.id == deviceId }
+        } else null
+        audioRecord?.setPreferredDevice(deviceInfo)
+        Log.d(tag, "Input device set to: ${deviceInfo?.productName ?: "Default"}")
+    }
+
+    fun setOutputDevice(deviceId: Int?) {
+        preferredOutputDeviceId = deviceId
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val deviceInfo = if (deviceId != null) {
+            am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).firstOrNull { it.id == deviceId }
+        } else null
+        audioTrack?.setPreferredDevice(deviceInfo)
+        Log.d(tag, "Output device set to: ${deviceInfo?.productName ?: "Default"}")
+    }
+
     fun setPostFilterEnabled(enabled: Boolean) {
         postFilterEnabled = enabled
         // Reset filter state when toggling to avoid artifacts
@@ -241,6 +266,17 @@ class AudioProcessor(private val context: Context) {
             .setTransferMode(AudioTrack.MODE_STREAM)
             .setBufferSizeInBytes(playBufferSize)
             .build()
+
+        // Apply preferred devices if set
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        preferredInputDeviceId?.let { id ->
+            val dev = am.getDevices(AudioManager.GET_DEVICES_INPUTS).firstOrNull { it.id == id }
+            audioRecord?.setPreferredDevice(dev)
+        }
+        preferredOutputDeviceId?.let { id ->
+            val dev = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).firstOrNull { it.id == id }
+            audioTrack?.setPreferredDevice(dev)
+        }
 
         audioTrack?.play()
     }
