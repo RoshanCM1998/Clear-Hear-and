@@ -378,7 +378,7 @@ class MainActivity : AppCompatActivity() {
         modeToggleGroup.addView(modeOff)
         modeToggleGroup.addView(modeLight)
         modeToggleGroup.addView(modeExtreme)
-        modeToggleGroup.check(modeLightId)
+        modeToggleGroup.check(modeOffId)
 
         modeToggleGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
             if (!isChecked) return@addOnButtonCheckedListener
@@ -395,7 +395,7 @@ class MainActivity : AppCompatActivity() {
                 modeOffId -> "OFF"
                 modeLightId -> "LIGHT"
                 modeExtremeId -> "EXTREME"
-                else -> "LIGHT"
+                else -> "OFF"
             }
             val intent = Intent(this@MainActivity, AudioForegroundService::class.java).apply {
                 action = AudioForegroundService.ACTION_SET_MODE
@@ -409,7 +409,7 @@ class MainActivity : AppCompatActivity() {
 
         // ── Filter Strategy Card ──
         strategyCard = createCard().apply {
-            visibility = View.VISIBLE // Light is pre-selected
+            visibility = View.GONE // OFF is pre-selected
         }
         val strategyContent = createCardContent()
         strategyContent.addView(createCardTitle("FILTER STRATEGY"))
@@ -888,8 +888,9 @@ class MainActivity : AppCompatActivity() {
             val volValue = volumeValueInput.text.toString().ifBlank { "100" }.toInt()
             val selectedMode = when (modeToggleGroup.checkedButtonId) {
                 modeOffId -> "OFF"
+                modeLightId -> "LIGHT"
                 modeExtremeId -> "EXTREME"
-                else -> "LIGHT"
+                else -> "OFF"
             }
             val service = Intent(this, AudioForegroundService::class.java).apply {
                 action = AudioForegroundService.ACTION_START

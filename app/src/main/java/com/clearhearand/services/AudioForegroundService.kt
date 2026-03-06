@@ -59,11 +59,11 @@ class AudioForegroundService : Service() {
             ACTION_START -> {
                 val gain100 = intent.getIntExtra(EXTRA_GAIN_100X, 100)
                 val vol100 = intent.getIntExtra(EXTRA_VOL_100X, 100)
-                val modeStr = intent.getStringExtra(EXTRA_MODE) ?: "LIGHT"
+                val modeStr = intent.getStringExtra(EXTRA_MODE) ?: "OFF"
                 val postFilter = intent.getBooleanExtra(EXTRA_POST_FILTER_ENABLED, false)
                 val eqBands = intent.getFloatArrayExtra(EXTRA_EQ_BANDS)
                 val eqModeMultiplier = intent.getBooleanExtra(EXTRA_EQ_MODE_MULTIPLIER, false)
-                val mode = runCatching { NoiseMode.valueOf(modeStr) }.getOrDefault(NoiseMode.LIGHT)
+                val mode = runCatching { NoiseMode.valueOf(modeStr) }.getOrDefault(NoiseMode.OFF)
                 startForeground(NOTIF_ID, buildNotification("Running: $mode"))
                 processor?.setEqMode(eqModeMultiplier)
                 processor?.start(mode, gain100, vol100, postFilter)
@@ -73,7 +73,7 @@ class AudioForegroundService : Service() {
             }
             ACTION_SET_MODE -> {
                 val modeStr = intent.getStringExtra(EXTRA_MODE) ?: return START_STICKY
-                val mode = runCatching { NoiseMode.valueOf(modeStr) }.getOrDefault(NoiseMode.LIGHT)
+                val mode = runCatching { NoiseMode.valueOf(modeStr) }.getOrDefault(NoiseMode.OFF)
                 debugLog("Switching mode to $mode")
                 processor?.setNoiseMode(mode)
             }

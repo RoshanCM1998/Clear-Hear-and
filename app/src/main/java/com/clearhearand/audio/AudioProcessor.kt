@@ -47,7 +47,7 @@ class AudioProcessor(private val context: Context) {
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
 
-    @Volatile private var noiseMode: NoiseMode = NoiseMode.LIGHT
+    @Volatile private var noiseMode: NoiseMode = NoiseMode.OFF
 
     @Volatile private var gainMultiplier: Float = 1.0f
     @Volatile private var volumeMultiplier: Float = 1.0f
@@ -72,7 +72,7 @@ class AudioProcessor(private val context: Context) {
     private var postDcBlocker: DcBlocker? = null
     private var postNoiseGate: AdaptiveNoiseGate? = null
 
-    fun start(initialMode: NoiseMode = NoiseMode.LIGHT, gain100x: Int = 100, volume100x: Int = 100, postFilter: Boolean = false) {
+    fun start(initialMode: NoiseMode = NoiseMode.OFF, gain100x: Int = 100, volume100x: Int = 100, postFilter: Boolean = false) {
         if (isRunning.getAndSet(true)) return
         noiseMode = initialMode
         gainMultiplier = gain100x / 100.0f
