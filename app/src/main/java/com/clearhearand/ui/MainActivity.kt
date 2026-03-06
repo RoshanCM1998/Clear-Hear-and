@@ -2,7 +2,9 @@ package com.clearhearand.ui
 
 import android.Manifest
 import android.content.ContentValues
+import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Color
@@ -15,8 +17,11 @@ import android.provider.MediaStore
 import android.text.InputFilter
 import android.text.InputType
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.inputmethod.InputMethodManager
+import android.graphics.Rect
 import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -67,6 +72,23 @@ class MainActivity : AppCompatActivity() {
     private var updatingGainFromSlider = false
     private var updatingVolumeFromSlider = false
 
+    // Profiles & EQ
+    private lateinit var prefs: SharedPreferences
+    private var activeProfile = 1
+    private val profileButtons = arrayOfNulls<MaterialButton>(5)
+    private val eqSliders = arrayOfNulls<Slider>(6)
+    private val eqInputs = arrayOfNulls<EditText>(6)
+    private val eqFreqNames = arrayOf("250", "500", "1k", "2k", "4k", "8k")
+    private var updatingFromProfile = false
+    private val updatingEqFromSlider = BooleanArray(6)
+
+    // Dual-mode EQ
+    private val eqAdditiveBands = FloatArray(6)   // dB values, default 0
+    private val eqMultiplierBands = FloatArray(6) { 100f } // multiplier %, default 100
+    private var eqModeMultiplier = false           // false = additive/dB, true = multiplier/%
+    private lateinit var eqModeSwitch: MaterialSwitch
+    private lateinit var eqModeSwitchLabel: TextView
+
     private val requestPermission = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { _ -> }
@@ -80,8 +102,21 @@ class MainActivity : AppCompatActivity() {
     private val startGreen = 0xFF5B8C5A.toInt()
     private val stopRed = 0xFF9E5555.toInt()
 
+    // Profile button colors
+    private val profileColors = intArrayOf(
+        0xFF5B9EA6.toInt(), // teal
+        0xFFB8965A.toInt(), // amber
+        0xFFA85A5A.toInt(), // coral
+        0xFF8A7EB8.toInt(), // lavender
+        0xFF5B8C5A.toInt()  // green
+    )
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // SharedPreferences
+        prefs = getSharedPreferences("clear_hear_prefs", Context.MODE_PRIVATE)
+        activeProfile = prefs.getInt("active_profile", 1)
 
         // Edge-to-edge
         WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -219,12 +254,20 @@ class MainActivity : AppCompatActivity() {
             return Triple(row, slider, input)
         }
 
+        // ── Load saved values from active profile ──
+        val savedGain = prefs.getInt("last_gain", prefs.getInt("profile_${activeProfile}_gain", 100)).toFloat().coerceIn(0f, 500f)
+        val savedVolume = prefs.getInt("last_volume", prefs.getInt("profile_${activeProfile}_volume", 100)).toFloat().coerceIn(0f, 500f)
+
+        // Migrate old EQ keys and load dual-mode bands
+        migrateEqKeys()
+        loadEqBandsFromPrefs(activeProfile)
+
         // ── Audio Gain Card ──
         val gainCard = createCard()
         val gainContent = createCardContent()
         gainContent.addView(createCardTitle("AUDIO GAIN"))
 
-        val (gainRow, gSlider, gInput) = createSliderRow(100f, {}, {})
+        val (gainRow, gSlider, gInput) = createSliderRow(savedGain, {}, {})
         gainSlider = gSlider
         gainValueInput = gInput
 
@@ -243,10 +286,15 @@ class MainActivity : AppCompatActivity() {
             override fun afterTextChanged(s: android.text.Editable?) {
                 if (updatingGainFromSlider) return
                 val v = s?.toString()?.toFloatOrNull() ?: return
-                if (v in 0f..500f) {
-                    gainSlider.value = v
-                    autoApplyParams()
+                val clamped = v.coerceIn(0f, 500f)
+                gainSlider.value = clamped
+                if (clamped != v) {
+                    updatingGainFromSlider = true
+                    gainValueInput.setText(clamped.toInt().toString())
+                    gainValueInput.setSelection(gainValueInput.text?.length ?: 0)
+                    updatingGainFromSlider = false
                 }
+                autoApplyParams()
             }
         })
 
@@ -258,7 +306,7 @@ class MainActivity : AppCompatActivity() {
         val volumeContent = createCardContent()
         volumeContent.addView(createCardTitle("MASTER VOLUME"))
 
-        val (volumeRow, vSlider, vInput) = createSliderRow(100f, {}, {})
+        val (volumeRow, vSlider, vInput) = createSliderRow(savedVolume, {}, {})
         volumeSlider = vSlider
         volumeValueInput = vInput
 
@@ -276,10 +324,15 @@ class MainActivity : AppCompatActivity() {
             override fun afterTextChanged(s: android.text.Editable?) {
                 if (updatingVolumeFromSlider) return
                 val v = s?.toString()?.toFloatOrNull() ?: return
-                if (v in 0f..500f) {
-                    volumeSlider.value = v
-                    autoApplyParams()
+                val clamped = v.coerceIn(0f, 500f)
+                volumeSlider.value = clamped
+                if (clamped != v) {
+                    updatingVolumeFromSlider = true
+                    volumeValueInput.setText(clamped.toInt().toString())
+                    volumeValueInput.setSelection(volumeValueInput.text?.length ?: 0)
+                    updatingVolumeFromSlider = false
                 }
+                autoApplyParams()
             }
         })
 
@@ -513,6 +566,215 @@ class MainActivity : AppCompatActivity() {
         recordContent.addView(recordNoiseButton)
         recordNoiseCard.addView(recordContent)
 
+        // ── Profiles Card ──
+        val profileCard = createCard()
+        val profileContent = createCardContent()
+        profileContent.addView(createCardTitle("PROFILES"))
+
+        val profileRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+        for (i in 0 until 5) {
+            val profileNum = i + 1
+            val btn = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                text = "$profileNum"
+                isCheckable = false
+                val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                params.setMargins(if (i > 0) dp(4) else 0, 0, 0, 0)
+                layoutParams = params
+                setOnClickListener { switchProfile(profileNum) }
+            }
+            profileButtons[i] = btn
+            profileRow.addView(btn)
+        }
+        updateProfileButtonStyles()
+        profileContent.addView(profileRow)
+        profileCard.addView(profileContent)
+
+        // ── Equalizer Card ──
+        val eqCard = createCard()
+        val eqContent = createCardContent()
+
+        // EQ header row: title + mode toggle
+        val eqHeaderRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+        eqHeaderRow.addView(createCardTitle("EQUALIZER").apply {
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        eqModeSwitchLabel = TextView(this).apply {
+            text = if (eqModeMultiplier) "x%" else "dB"
+            setTextColor(accentTeal)
+            textSize = 12f
+            setPadding(0, 0, dp(6), 0)
+        }
+        eqModeSwitch = MaterialSwitch(this).apply {
+            isChecked = eqModeMultiplier
+            setOnCheckedChangeListener { _, isChecked ->
+                onEqModeToggled(isChecked)
+            }
+        }
+        eqHeaderRow.addView(eqModeSwitchLabel)
+        eqHeaderRow.addView(eqModeSwitch)
+        eqContent.addView(eqHeaderRow)
+
+        // Current active bands for initial slider values
+        val activeBands = if (eqModeMultiplier) eqMultiplierBands else eqAdditiveBands
+
+        val eqRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+        for (i in 0 until 6) {
+            val col = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+
+            val bandIndex = i
+
+            // Editable value input
+            val valInput = EditText(this).apply {
+                setText(formatEqValue(activeBands[i]))
+                setTextColor(textPrimary)
+                textSize = 11f
+                gravity = Gravity.CENTER
+                inputType = if (eqModeMultiplier)
+                    InputType.TYPE_CLASS_NUMBER
+                else
+                    InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_SIGNED
+                filters = arrayOf(InputFilter.LengthFilter(4))
+                background = GradientDrawable().apply {
+                    setStroke((1 * density).toInt(), 0xFF444444.toInt())
+                    cornerRadius = 6 * density
+                }
+                setPadding(dp(4), dp(4), dp(4), dp(4))
+                minWidth = dp(44)
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            }
+            valInput.addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                override fun afterTextChanged(s: android.text.Editable?) {
+                    if (updatingEqFromSlider[bandIndex]) return
+                    val v = s?.toString()?.toFloatOrNull() ?: return
+                    val slider = eqSliders[bandIndex] ?: return
+                    val clamped = v.coerceIn(slider.valueFrom, slider.valueTo)
+                    val step = slider.stepSize
+                    val snapped = if (step > 0) (Math.round(clamped / step) * step) else clamped
+                    if (eqModeMultiplier) {
+                        eqMultiplierBands[bandIndex] = snapped
+                    } else {
+                        eqAdditiveBands[bandIndex] = snapped
+                    }
+                    slider.value = snapped
+                    if (snapped != v) {
+                        updatingEqFromSlider[bandIndex] = true
+                        valInput.setText(formatEqValue(snapped))
+                        valInput.setSelection(valInput.text?.length ?: 0)
+                        updatingEqFromSlider[bandIndex] = false
+                    }
+                    saveEqToProfile()
+                    autoApplyEq()
+                }
+            })
+            eqInputs[i] = valInput
+
+            // Vertical slider: rotation on Slider, touch listener prevents ScrollView interception
+            val sliderFrame = FrameLayout(this).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    dp(180)
+                )
+            }
+            val slider = Slider(this).apply {
+                if (eqModeMultiplier) {
+                    valueFrom = 0f; valueTo = 500f; stepSize = 5f
+                } else {
+                    valueFrom = -12f; valueTo = 12f; stepSize = 1f
+                }
+                value = activeBands[i]
+                rotation = 270f
+                trackActiveTintList = ColorStateList.valueOf(accentTeal)
+                thumbTintList = ColorStateList.valueOf(accentTeal)
+                trackInactiveTintList = ColorStateList.valueOf(0xFF333333.toInt())
+                layoutParams = FrameLayout.LayoutParams(
+                    dp(180),
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.CENTER
+                )
+            }
+            // Prevent ScrollView from stealing vertical drags
+            slider.setOnTouchListener { v, event ->
+                when (event.action) {
+                    MotionEvent.ACTION_DOWN -> v.parent.requestDisallowInterceptTouchEvent(true)
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> v.parent.requestDisallowInterceptTouchEvent(false)
+                }
+                false
+            }
+            slider.addOnChangeListener { _, value, fromUser ->
+                if (fromUser) {
+                    if (eqModeMultiplier) {
+                        eqMultiplierBands[bandIndex] = value
+                    } else {
+                        eqAdditiveBands[bandIndex] = value
+                    }
+                    updatingEqFromSlider[bandIndex] = true
+                    valInput.setText(formatEqValue(value))
+                    updatingEqFromSlider[bandIndex] = false
+                    saveEqToProfile()
+                    autoApplyEq()
+                }
+            }
+            eqSliders[i] = slider
+            sliderFrame.addView(slider)
+
+            // Frequency label
+            val freqLabel = TextView(this).apply {
+                text = eqFreqNames[i]
+                setTextColor(textSecondary)
+                textSize = 11f
+                gravity = Gravity.CENTER
+            }
+
+            col.addView(valInput)
+            col.addView(sliderFrame)
+            col.addView(freqLabel)
+            eqRow.addView(col)
+        }
+        eqContent.addView(eqRow)
+
+        // Reset EQ button
+        val resetEqButton = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            text = "Reset EQ"
+            setTextColor(textSecondary)
+            strokeColor = ColorStateList.valueOf(0xFF444444.toInt())
+            cornerRadius = dp(20)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, dp(8), 0, 0) }
+            setOnClickListener { resetEq() }
+        }
+        eqContent.addView(resetEqButton)
+        eqCard.addView(eqContent)
+
         // ── Log Buttons Row ──
         val logsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -575,6 +837,8 @@ class MainActivity : AppCompatActivity() {
         contentLayout.addView(strategyCard)
         contentLayout.addView(postFilterCard)
         contentLayout.addView(recordNoiseCard)
+        contentLayout.addView(profileCard)
+        contentLayout.addView(eqCard)
         contentLayout.addView(logsRow)
         contentLayout.addView(versionFooter)
 
@@ -633,6 +897,8 @@ class MainActivity : AppCompatActivity() {
                 putExtra(AudioForegroundService.EXTRA_VOL_100X, volValue)
                 putExtra(AudioForegroundService.EXTRA_MODE, selectedMode)
                 putExtra(AudioForegroundService.EXTRA_POST_FILTER_ENABLED, postFilterSwitch.isChecked)
+                putExtra(AudioForegroundService.EXTRA_EQ_MODE_MULTIPLIER, eqModeMultiplier)
+                putExtra(AudioForegroundService.EXTRA_EQ_BANDS, currentEqBands().clone())
             }
             ContextCompat.startForegroundService(this, service)
             isRunning = true
@@ -650,15 +916,215 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun autoApplyParams() {
-        if (!isRunning) return
         val gainValue = gainValueInput.text.toString().ifBlank { "100" }.toIntOrNull() ?: 100
         val volValue = volumeValueInput.text.toString().ifBlank { "100" }.toIntOrNull() ?: 100
+
+        // Persist last-used values and active profile
+        if (!updatingFromProfile) {
+            prefs.edit()
+                .putInt("last_gain", gainValue)
+                .putInt("last_volume", volValue)
+                .putInt("profile_${activeProfile}_gain", gainValue)
+                .putInt("profile_${activeProfile}_volume", volValue)
+                .apply()
+        }
+
+        if (!isRunning) return
         val intent = Intent(this, AudioForegroundService::class.java).apply {
             action = AudioForegroundService.ACTION_SET_PARAMS
             putExtra(AudioForegroundService.EXTRA_GAIN_100X, gainValue)
             putExtra(AudioForegroundService.EXTRA_VOL_100X, volValue)
         }
         startService(intent)
+    }
+
+    private fun formatEqValue(value: Float): String = value.toInt().toString()
+
+    private fun currentEqBands(): FloatArray =
+        if (eqModeMultiplier) eqMultiplierBands else eqAdditiveBands
+
+    private fun updateProfileButtonStyles() {
+        for (i in 0 until 5) {
+            val btn = profileButtons[i] ?: continue
+            val color = profileColors[i]
+            if (i + 1 == activeProfile) {
+                btn.backgroundTintList = ColorStateList.valueOf(color)
+                btn.setTextColor(Color.WHITE)
+                btn.strokeWidth = 0
+            } else {
+                btn.backgroundTintList = ColorStateList.valueOf(Color.TRANSPARENT)
+                btn.setTextColor(color)
+                btn.strokeColor = ColorStateList.valueOf(color)
+                btn.strokeWidth = (2 * resources.displayMetrics.density).toInt()
+            }
+        }
+    }
+
+    private fun switchProfile(newProfile: Int) {
+        if (newProfile == activeProfile) return
+
+        // Save current values to current profile
+        val gainValue = gainValueInput.text.toString().ifBlank { "100" }.toIntOrNull() ?: 100
+        val volValue = volumeValueInput.text.toString().ifBlank { "100" }.toIntOrNull() ?: 100
+        val editor = prefs.edit()
+        editor.putInt("profile_${activeProfile}_gain", gainValue)
+        editor.putInt("profile_${activeProfile}_volume", volValue)
+        saveEqBandsToEditor(editor, activeProfile)
+
+        // Switch active profile
+        activeProfile = newProfile
+        editor.putInt("active_profile", newProfile)
+        editor.apply()
+
+        // Load new profile values
+        loadProfile(newProfile)
+    }
+
+    private fun loadProfile(profile: Int) {
+        updatingFromProfile = true
+
+        val gain = prefs.getInt("profile_${profile}_gain", 100).toFloat().coerceIn(0f, 500f)
+        val volume = prefs.getInt("profile_${profile}_volume", 100).toFloat().coerceIn(0f, 500f)
+
+        gainSlider.value = gain
+        gainValueInput.setText(gain.toInt().toString())
+        volumeSlider.value = volume
+        volumeValueInput.setText(volume.toInt().toString())
+
+        // Load EQ state
+        loadEqBandsFromPrefs(profile)
+        eqModeSwitch.isChecked = eqModeMultiplier
+        eqModeSwitchLabel.text = if (eqModeMultiplier) "x%" else "dB"
+        updateEqSliders()
+
+        // Save as last-used
+        prefs.edit()
+            .putInt("last_gain", gain.toInt())
+            .putInt("last_volume", volume.toInt())
+            .apply()
+
+        updateProfileButtonStyles()
+        updatingFromProfile = false
+
+        // Apply to running service
+        autoApplyParams()
+        sendEqModeToService()
+        autoApplyEq()
+    }
+
+    private fun saveEqToProfile() {
+        val editor = prefs.edit()
+        saveEqBandsToEditor(editor, activeProfile)
+        editor.apply()
+    }
+
+    private fun saveEqBandsToEditor(editor: SharedPreferences.Editor, profile: Int) {
+        for (i in 0 until 6) {
+            editor.putFloat("profile_${profile}_eq_additive_$i", eqAdditiveBands[i])
+            editor.putFloat("profile_${profile}_eq_multiplier_$i", eqMultiplierBands[i])
+        }
+        editor.putBoolean("profile_${profile}_eq_mode", eqModeMultiplier)
+    }
+
+    private fun loadEqBandsFromPrefs(profile: Int) {
+        eqModeMultiplier = prefs.getBoolean("profile_${profile}_eq_mode", false)
+        for (i in 0 until 6) {
+            eqAdditiveBands[i] = prefs.getFloat("profile_${profile}_eq_additive_$i", 0f)
+            eqMultiplierBands[i] = prefs.getFloat("profile_${profile}_eq_multiplier_$i", 100f)
+        }
+    }
+
+    private fun migrateEqKeys() {
+        // Migrate old profile_{n}_eq_{i} keys to profile_{n}_eq_additive_{i}
+        for (p in 1..5) {
+            val oldKey = "profile_${p}_eq_0"
+            if (prefs.contains(oldKey) && !prefs.contains("profile_${p}_eq_additive_0")) {
+                val editor = prefs.edit()
+                for (i in 0 until 6) {
+                    val value = prefs.getFloat("profile_${p}_eq_$i", 0f)
+                    editor.putFloat("profile_${p}_eq_additive_$i", value)
+                    editor.putFloat("profile_${p}_eq_multiplier_$i", 100f)
+                    editor.remove("profile_${p}_eq_$i")
+                }
+                editor.putBoolean("profile_${p}_eq_mode", false)
+                editor.apply()
+            }
+        }
+    }
+
+    private fun autoApplyEq() {
+        if (!isRunning) return
+        val intent = Intent(this, AudioForegroundService::class.java).apply {
+            action = AudioForegroundService.ACTION_SET_EQ_BANDS
+            putExtra(AudioForegroundService.EXTRA_EQ_BANDS, currentEqBands().clone())
+        }
+        startService(intent)
+    }
+
+    private fun sendEqModeToService() {
+        if (!isRunning) return
+        val intent = Intent(this, AudioForegroundService::class.java).apply {
+            action = AudioForegroundService.ACTION_SET_EQ_MODE
+            putExtra(AudioForegroundService.EXTRA_EQ_MODE_MULTIPLIER, eqModeMultiplier)
+        }
+        startService(intent)
+    }
+
+    private fun onEqModeToggled(isMultiplier: Boolean) {
+        eqModeMultiplier = isMultiplier
+        eqModeSwitchLabel.text = if (isMultiplier) "x%" else "dB"
+        updateEqSliders()
+        saveEqToProfile()
+        sendEqModeToService()
+        autoApplyEq()
+    }
+
+    private fun updateEqSliders() {
+        val bands = currentEqBands()
+        for (i in 0 until 6) {
+            val slider = eqSliders[i] ?: continue
+            if (eqModeMultiplier) {
+                slider.valueFrom = 0f
+                slider.valueTo = 500f
+                slider.stepSize = 5f
+            } else {
+                slider.valueFrom = -12f
+                slider.valueTo = 12f
+                slider.stepSize = 1f
+            }
+            slider.value = bands[i]
+            updatingEqFromSlider[i] = true
+            eqInputs[i]?.let { input ->
+                input.setText(formatEqValue(bands[i]))
+                input.inputType = if (eqModeMultiplier)
+                    InputType.TYPE_CLASS_NUMBER
+                else
+                    InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_SIGNED
+            }
+            updatingEqFromSlider[i] = false
+        }
+    }
+
+    private fun resetEq() {
+        if (eqModeMultiplier) {
+            for (i in 0 until 6) {
+                eqMultiplierBands[i] = 100f
+                eqSliders[i]?.value = 100f
+                updatingEqFromSlider[i] = true
+                eqInputs[i]?.setText(formatEqValue(100f))
+                updatingEqFromSlider[i] = false
+            }
+        } else {
+            for (i in 0 until 6) {
+                eqAdditiveBands[i] = 0f
+                eqSliders[i]?.value = 0f
+                updatingEqFromSlider[i] = true
+                eqInputs[i]?.setText(formatEqValue(0f))
+                updatingEqFromSlider[i] = false
+            }
+        }
+        saveEqToProfile()
+        autoApplyEq()
     }
 
     private fun clearLogsToday() {
@@ -855,5 +1321,21 @@ class MainActivity : AppCompatActivity() {
             perms.add(Manifest.permission.BLUETOOTH_CONNECT)
         }
         requestPermission.launch(perms.toTypedArray())
+    }
+
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.action == MotionEvent.ACTION_DOWN) {
+            val v = currentFocus
+            if (v is android.widget.EditText) {
+                val outRect = Rect()
+                v.getGlobalVisibleRect(outRect)
+                if (!outRect.contains(ev.rawX.toInt(), ev.rawY.toInt())) {
+                    v.clearFocus()
+                    val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
+                    imm.hideSoftInputFromWindow(v.windowToken, 0)
+                }
+            }
+        }
+        return super.dispatchTouchEvent(ev)
     }
 }

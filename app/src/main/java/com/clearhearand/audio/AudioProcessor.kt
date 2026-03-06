@@ -3,6 +3,9 @@ package com.clearhearand.audio
 import android.content.Context
 import android.media.*
 import android.util.Log
+import com.clearhearand.audio.dsp.eq.AdditiveEqualizer
+import com.clearhearand.audio.dsp.eq.IEqualizer
+import com.clearhearand.audio.dsp.eq.MultiplierEqualizer
 import com.clearhearand.audio.dsp.lightmode.AdaptiveNoiseGate
 import com.clearhearand.audio.dsp.lightmode.DcBlocker
 import com.clearhearand.audio.logging.AudioLogger
@@ -60,6 +63,10 @@ class AudioProcessor(private val context: Context) {
 
     private var logger: AudioLogger? = null
 
+    // 6-band parametric EQ applied after processor, before post-filter
+    private var equalizer: IEqualizer? = null
+    @Volatile private var eqModeMultiplier: Boolean = false
+
     // Post-filter: DC Block + Noise Gate applied after volume (catches residual noise)
     @Volatile private var postFilterEnabled: Boolean = false
     private var postDcBlocker: DcBlocker? = null
@@ -73,6 +80,9 @@ class AudioProcessor(private val context: Context) {
         postFilterEnabled = postFilter
 
         logger = AudioLogger(context)
+
+        // Initialize EQ based on current mode
+        equalizer = if (eqModeMultiplier) MultiplierEqualizer(sampleRate) else AdditiveEqualizer(sampleRate)
 
         // Initialize post-filter DSP components
         postDcBlocker = DcBlocker(sampleRate, cutoffFreq = 20f)
@@ -102,6 +112,7 @@ class AudioProcessor(private val context: Context) {
         audioTrack?.release(); audioTrack = null
         queue.clear()
         logger?.close(); logger = null
+        equalizer?.reset(); equalizer = null
         postDcBlocker = null
         postNoiseGate = null
     }
@@ -149,6 +160,20 @@ class AudioProcessor(private val context: Context) {
         gainMultiplier = gain100x / 100.0f
         volumeMultiplier = volume100x / 100.0f
         Log.d(tag, "Updated gain=$gainMultiplier, volume=$volumeMultiplier")
+    }
+
+    fun setEqBands(bands: FloatArray) {
+        equalizer?.setBands(bands)
+        Log.d(tag, "EQ bands updated: ${bands.joinToString()}")
+    }
+
+    fun setEqMode(isMultiplier: Boolean) {
+        if (eqModeMultiplier == isMultiplier) return
+        eqModeMultiplier = isMultiplier
+        val oldEq = equalizer
+        equalizer = if (isMultiplier) MultiplierEqualizer(sampleRate) else AdditiveEqualizer(sampleRate)
+        oldEq?.reset()
+        Log.d(tag, "EQ mode switched to ${if (isMultiplier) "Multiplier" else "Additive"}")
     }
 
     fun setPostFilterEnabled(enabled: Boolean) {
@@ -261,6 +286,12 @@ class AudioProcessor(private val context: Context) {
 
                     // Main processing: Gain → Filter → Volume (handled by each processor)
                     processor.process(inChunk, outBuffer, gain, volume)
+
+                    // EQ applied on cleaned signal — preserves all frequency shaping
+                    val eq = equalizer
+                    if (eq != null && !eq.isFlat()) {
+                        eq.process(outBuffer)
+                    }
 
                     // Post-filter: DC Block + Noise Gate (catches volume-amplified residual)
                     if (postFilterEnabled) {

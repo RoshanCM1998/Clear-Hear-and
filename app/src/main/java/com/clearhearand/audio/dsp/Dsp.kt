@@ -4,15 +4,17 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.min
+import kotlin.math.pow
 import kotlin.math.sin
 
-enum class FilterType { LOWPASS, HIGHPASS }
+enum class FilterType { LOWPASS, HIGHPASS, PEAKING }
 
 class Biquad(
     private val type: FilterType,
     private val sampleRate: Int,
     private val cutoffHz: Double,
-    private val q: Double = 0.707
+    private val q: Double = 0.707,
+    private var dBGain: Double = 0.0
 ) {
     private var b0 = 0.0
     private var b1 = 0.0
@@ -25,13 +27,19 @@ class Biquad(
 
     init { recalc() }
 
+    fun setGain(newDbGain: Double) {
+        dBGain = newDbGain
+        recalc()
+        reset()
+    }
+
     private fun recalc() {
         val w0 = 2.0 * PI * (cutoffHz / sampleRate)
         val alpha = sin(w0) / (2.0 * q)
         val c = cos(w0)
-        val a0 = 1.0 + alpha
         when (type) {
             FilterType.LOWPASS -> {
+                val a0 = 1.0 + alpha
                 val bb0 = (1.0 - c) / 2.0
                 val bb1 = 1.0 - c
                 val bb2 = (1.0 - c) / 2.0
@@ -41,6 +49,7 @@ class Biquad(
                 a1 = aa1 / a0; a2 = aa2 / a0
             }
             FilterType.HIGHPASS -> {
+                val a0 = 1.0 + alpha
                 val bb0 = (1.0 + c) / 2.0
                 val bb1 = -(1.0 + c)
                 val bb2 = (1.0 + c) / 2.0
@@ -48,6 +57,17 @@ class Biquad(
                 val aa2 = 1.0 - alpha
                 b0 = bb0 / a0; b1 = bb1 / a0; b2 = bb2 / a0
                 a1 = aa1 / a0; a2 = aa2 / a0
+            }
+            FilterType.PEAKING -> {
+                val A = 10.0.pow(dBGain / 40.0)
+                val alphaA = alpha * A
+                val alphaOverA = alpha / A
+                val a0 = 1.0 + alphaOverA
+                b0 = (1.0 + alphaA) / a0
+                b1 = (-2.0 * c) / a0
+                b2 = (1.0 - alphaA) / a0
+                a1 = (-2.0 * c) / a0
+                a2 = (1.0 - alphaOverA) / a0
             }
         }
     }
