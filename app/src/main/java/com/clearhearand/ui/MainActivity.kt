@@ -4,6 +4,9 @@ import android.Manifest
 import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -11,158 +14,471 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.text.InputFilter
 import android.text.InputType
+import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.widget.*
-import android.widget.CheckBox
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import com.clearhearand.R
 import com.clearhearand.audio.NoiseMode
 import com.clearhearand.services.AudioForegroundService
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.button.MaterialButtonToggleGroup
+import com.google.android.material.card.MaterialCardView
+import com.google.android.material.materialswitch.MaterialSwitch
+import com.google.android.material.slider.Slider
+import com.google.android.material.textfield.TextInputEditText
+import com.google.android.material.textfield.TextInputLayout
 import java.io.File
 import java.io.FileInputStream
-import java.text.SimpleDateFormat
-import java.util.Date
 import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
-    private lateinit var gainInput: EditText
-    private lateinit var volumeInput: EditText
-    private lateinit var startStopButton: Button
-    private lateinit var modeGroup: RadioGroup
-    private lateinit var applyParamsButton: Button
-    private lateinit var exportButton: Button
-    private lateinit var clearLogsButton: Button
-    private lateinit var recordNoiseButton: Button
-    private lateinit var strategyGroup: RadioGroup
-    private lateinit var strategyLabel: TextView
-    private lateinit var postFilterCheck: CheckBox
+
+    private lateinit var gainSlider: Slider
+    private lateinit var gainValueInput: TextInputEditText
+    private lateinit var volumeSlider: Slider
+    private lateinit var volumeValueInput: TextInputEditText
+    private lateinit var startStopFab: MaterialButton
+    private lateinit var modeToggleGroup: MaterialButtonToggleGroup
+    private lateinit var exportButton: MaterialButton
+    private lateinit var clearLogsButton: MaterialButton
+    private lateinit var recordNoiseButton: MaterialButton
+    private lateinit var strategyCard: MaterialCardView
+    private lateinit var postFilterSwitch: MaterialSwitch
+    private lateinit var recordNoiseCard: MaterialCardView
+
+    private var modeOffId = View.generateViewId()
+    private var modeLightId = View.generateViewId()
+    private var modeExtremeId = View.generateViewId()
+
+    private var strategyHardwareId = View.generateViewId()
+    private var strategyHighPassId = View.generateViewId()
+    private var strategyAdaptiveId = View.generateViewId()
+    private var strategyCustomId = View.generateViewId()
 
     private var isRunning: Boolean = false
     private var isRecordingNoise: Boolean = false
+    private var updatingGainFromSlider = false
+    private var updatingVolumeFromSlider = false
 
     private val requestPermission = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { _ ->
-        // No-op; we check again on click
-    }
+    ) { _ -> }
+
+    // Colors
+    private val surfaceDark = 0xFF121212.toInt()
+    private val surfaceCard = 0xFF1E1E1E.toInt()
+    private val accentTeal = 0xFF7A9BA5.toInt()
+    private val textPrimary = 0xFFFFFFFF.toInt()
+    private val textSecondary = 0xB3FFFFFF.toInt()
+    private val startGreen = 0xFF5B8C5A.toInt()
+    private val stopRed = 0xFF9E5555.toInt()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val rootLayout = LinearLayout(this).apply {
+        // Edge-to-edge
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+
+        val density = resources.displayMetrics.density
+        fun dp(value: Int) = (value * density).toInt()
+        fun dpf(value: Int) = value * density
+
+        // ── Root FrameLayout ──
+        val root = FrameLayout(this).apply {
+            setBackgroundColor(surfaceDark)
+        }
+
+        // ── ScrollView ──
+        val scrollView = ScrollView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+            isVerticalScrollBarEnabled = false
+        }
+
+        val contentLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(48, 48, 48, 48)
+            setPadding(dp(16), dp(16), dp(16), dp(100)) // bottom padding for FAB clearance
         }
 
-        val gainLabel = TextView(this).apply { text = "Gain (e.g., 100, 125, 325)" }
-        gainInput = EditText(this).apply {
-            hint = "100"
-            inputType = InputType.TYPE_CLASS_NUMBER
-            filters = arrayOf(InputFilter.LengthFilter(4))
+        // Apply system bar insets
+        ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
+            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            contentLayout.setPadding(dp(16), dp(16) + systemBars.top, dp(16), dp(100) + systemBars.bottom)
+            insets
         }
 
-        val volLabel = TextView(this).apply { text = "Master Volume (e.g., 100, 125, 325)" }
-        volumeInput = EditText(this).apply {
-            hint = "100"
-            inputType = InputType.TYPE_CLASS_NUMBER
-            filters = arrayOf(InputFilter.LengthFilter(4))
+        // ── Header ──
+        val header = TextView(this).apply {
+            text = "Clear Hear"
+            setTextColor(textPrimary)
+            textSize = 28f
+            typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setPadding(0, dp(8), 0, dp(4))
         }
 
-        val modeLabel = TextView(this).apply { text = "Noise Reduction Mode" }
-        modeGroup = RadioGroup(this).apply {
-            orientation = RadioGroup.HORIZONTAL
-            val off = RadioButton(this@MainActivity).apply { text = "Off"; id = View.generateViewId() }
-            val light = RadioButton(this@MainActivity).apply { text = "Light"; id = View.generateViewId() }
-            val extreme = RadioButton(this@MainActivity).apply { text = "Extreme"; id = View.generateViewId() }
-            addView(off)
-            addView(light)
-            addView(extreme)
-            check(light.id)
-            setOnCheckedChangeListener { _, checkedId ->
-                // Update LIGHT mode controls visibility
-                val isLightMode = checkedId == light.id
-                strategyLabel.visibility = if (isLightMode) View.VISIBLE else View.GONE
-                strategyGroup.visibility = if (isLightMode) View.VISIBLE else View.GONE
+        val subtitle = TextView(this).apply {
+            text = "Hearing Enhancement"
+            setTextColor(accentTeal)
+            textSize = 14f
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, dp(16))
+        }
 
-                // Hide Record Noise button when not in LIGHT mode
-                if (!isLightMode) {
-                    recordNoiseButton.visibility = View.GONE
+        // ── Helper: create a MaterialCardView ──
+        fun createCard(): MaterialCardView {
+            return MaterialCardView(this).apply {
+                radius = dpf(12)
+                cardElevation = dpf(2)
+                setCardBackgroundColor(surfaceCard)
+                strokeWidth = 0
+                val params = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+                params.setMargins(0, 0, 0, dp(12))
+                layoutParams = params
+            }
+        }
+
+        // ── Helper: card inner padding layout ──
+        fun createCardContent(): LinearLayout {
+            return LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(16), dp(10), dp(16), dp(10))
+            }
+        }
+
+        // ── Helper: card title ──
+        fun createCardTitle(title: String): TextView {
+            return TextView(this).apply {
+                text = title
+                setTextColor(accentTeal)
+                textSize = 13f
+                typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.BOLD)
+                setPadding(0, 0, 0, dp(4))
+            }
+        }
+
+        // ── Helper: slider + input row ──
+        fun createSliderRow(
+            defaultValue: Float,
+            onSliderChange: (Float) -> Unit,
+            onTextChange: (Int) -> Unit
+        ): Triple<LinearLayout, Slider, TextInputEditText> {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+
+            val slider = Slider(this).apply {
+                valueFrom = 0f
+                valueTo = 500f
+                value = defaultValue
+                stepSize = 1f
+                val sliderParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                sliderParams.setMargins(0, 0, dp(8), 0)
+                layoutParams = sliderParams
+                trackActiveTintList = ColorStateList.valueOf(accentTeal)
+                thumbTintList = ColorStateList.valueOf(accentTeal)
+                trackInactiveTintList = ColorStateList.valueOf(0xFF333333.toInt())
+            }
+
+            val inputLayout = TextInputLayout(this, null, com.google.android.material.R.attr.textInputOutlinedStyle).apply {
+                layoutParams = LinearLayout.LayoutParams(dp(72), LinearLayout.LayoutParams.WRAP_CONTENT)
+                boxStrokeColor = accentTeal
+                hintTextColor = ColorStateList.valueOf(textSecondary)
+            }
+
+            val input = TextInputEditText(inputLayout.context).apply {
+                inputType = InputType.TYPE_CLASS_NUMBER
+                filters = arrayOf(InputFilter.LengthFilter(3))
+                setText(defaultValue.toInt().toString())
+                setTextColor(textPrimary)
+                textSize = 14f
+                gravity = Gravity.CENTER
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            }
+
+            inputLayout.addView(input)
+            row.addView(slider)
+            row.addView(inputLayout)
+
+            return Triple(row, slider, input)
+        }
+
+        // ── Audio Gain Card ──
+        val gainCard = createCard()
+        val gainContent = createCardContent()
+        gainContent.addView(createCardTitle("AUDIO GAIN"))
+
+        val (gainRow, gSlider, gInput) = createSliderRow(100f, {}, {})
+        gainSlider = gSlider
+        gainValueInput = gInput
+
+        // Bidirectional sync + auto-apply
+        gainSlider.addOnChangeListener { _, value, fromUser ->
+            if (fromUser) {
+                updatingGainFromSlider = true
+                gainValueInput.setText(value.toInt().toString())
+                updatingGainFromSlider = false
+                autoApplyParams()
+            }
+        }
+        gainValueInput.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                if (updatingGainFromSlider) return
+                val v = s?.toString()?.toFloatOrNull() ?: return
+                if (v in 0f..500f) {
+                    gainSlider.value = v
+                    autoApplyParams()
                 }
+            }
+        })
 
-                if (!isRunning) return@setOnCheckedChangeListener
-                val mode = when (checkedId) {
-                    off.id -> "OFF"
-                    light.id -> "LIGHT"
-                    extreme.id -> "EXTREME"
-                    else -> "LIGHT"
-                }
-                val intent = Intent(this@MainActivity, AudioForegroundService::class.java).apply {
-                    action = AudioForegroundService.ACTION_SET_MODE
-                    putExtra(AudioForegroundService.EXTRA_MODE, mode)
-                }
-                startService(intent)
+        gainContent.addView(gainRow)
+        gainCard.addView(gainContent)
+
+        // ── Master Volume Card ──
+        val volumeCard = createCard()
+        val volumeContent = createCardContent()
+        volumeContent.addView(createCardTitle("MASTER VOLUME"))
+
+        val (volumeRow, vSlider, vInput) = createSliderRow(100f, {}, {})
+        volumeSlider = vSlider
+        volumeValueInput = vInput
+
+        volumeSlider.addOnChangeListener { _, value, fromUser ->
+            if (fromUser) {
+                updatingVolumeFromSlider = true
+                volumeValueInput.setText(value.toInt().toString())
+                updatingVolumeFromSlider = false
+                autoApplyParams()
             }
         }
+        volumeValueInput.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                if (updatingVolumeFromSlider) return
+                val v = s?.toString()?.toFloatOrNull() ?: return
+                if (v in 0f..500f) {
+                    volumeSlider.value = v
+                    autoApplyParams()
+                }
+            }
+        })
 
-        // Strategy selector for LIGHT mode (4 filtering options)
-        strategyLabel = TextView(this).apply {
-            text = "Filter Strategy (LIGHT mode only)"
-            visibility = View.VISIBLE  // Visible since LIGHT is pre-selected
+        volumeContent.addView(volumeRow)
+        volumeCard.addView(volumeContent)
+
+        // ── Noise Reduction Card ──
+        val modeCard = createCard()
+        val modeContent = createCardContent()
+        modeContent.addView(createCardTitle("NOISE REDUCTION"))
+
+        modeToggleGroup = MaterialButtonToggleGroup(this).apply {
+            isSingleSelection = true
+            isSelectionRequired = true
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
         }
 
-        strategyGroup = RadioGroup(this).apply {
-            orientation = RadioGroup.VERTICAL
-            val android = RadioButton(this@MainActivity).apply {
-                text = "Android Effects (Hardware)"
-                id = View.generateViewId()
-            }
-            val highpass = RadioButton(this@MainActivity).apply {
-                text = "High-Pass Filter (DC + 80Hz)"
-                id = View.generateViewId()
-            }
-            val adaptive = RadioButton(this@MainActivity).apply {
-                text = "Adaptive Gate (HP + Gating)"
-                id = View.generateViewId()
-            }
-            val custom = RadioButton(this@MainActivity).apply {
-                text = "Custom Profile (Learned)"
-                id = View.generateViewId()
-            }
-
-            addView(android)
-            addView(highpass)
-            addView(adaptive)
-            addView(custom)
-            check(android.id)  // Default to Android effects
-            visibility = View.VISIBLE  // Visible since LIGHT is pre-selected
-
-            setOnCheckedChangeListener { _, checkedId ->
-                // Update Record Noise button visibility when strategy changes
-                val isCustomProfile = checkedId == custom.id
-                recordNoiseButton.visibility = if (isCustomProfile) View.VISIBLE else View.GONE
-
-                if (!isRunning) return@setOnCheckedChangeListener
-
-                val strategy = when (checkedId) {
-                    android.id -> "android"
-                    highpass.id -> "highpass"
-                    adaptive.id -> "adaptive"
-                    custom.id -> "custom"
-                    else -> "android"
-                }
-
-                val intent = Intent(this@MainActivity, AudioForegroundService::class.java).apply {
-                    action = AudioForegroundService.ACTION_SET_LIGHT_STRATEGY
-                    putExtra(AudioForegroundService.EXTRA_LIGHT_STRATEGY, strategy)
-                }
-                startService(intent)
-            }
+        val modeOff = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            id = modeOffId
+            text = "Off"
+            isCheckable = true
+            val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            layoutParams = params
+        }
+        val modeLight = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            id = modeLightId
+            text = "Light"
+            isCheckable = true
+            val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            layoutParams = params
+        }
+        val modeExtreme = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            id = modeExtremeId
+            text = "Extreme"
+            isCheckable = true
+            val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            layoutParams = params
         }
 
-        postFilterCheck = CheckBox(this).apply {
-            text = "Post-Filter (DC Block + Noise Gate)"
+        modeToggleGroup.addView(modeOff)
+        modeToggleGroup.addView(modeLight)
+        modeToggleGroup.addView(modeExtreme)
+        modeToggleGroup.check(modeLightId)
+
+        modeToggleGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (!isChecked) return@addOnButtonCheckedListener
+
+            val isLightMode = checkedId == modeLightId
+            strategyCard.visibility = if (isLightMode) View.VISIBLE else View.GONE
+
+            if (!isLightMode) {
+                recordNoiseCard.visibility = View.GONE
+            }
+
+            if (!isRunning) return@addOnButtonCheckedListener
+            val mode = when (checkedId) {
+                modeOffId -> "OFF"
+                modeLightId -> "LIGHT"
+                modeExtremeId -> "EXTREME"
+                else -> "LIGHT"
+            }
+            val intent = Intent(this@MainActivity, AudioForegroundService::class.java).apply {
+                action = AudioForegroundService.ACTION_SET_MODE
+                putExtra(AudioForegroundService.EXTRA_MODE, mode)
+            }
+            startService(intent)
+        }
+
+        modeContent.addView(modeToggleGroup)
+        modeCard.addView(modeContent)
+
+        // ── Filter Strategy Card ──
+        strategyCard = createCard().apply {
+            visibility = View.VISIBLE // Light is pre-selected
+        }
+        val strategyContent = createCardContent()
+        strategyContent.addView(createCardTitle("FILTER STRATEGY"))
+
+        // 2x2 grid for strategy buttons
+        val strategyGrid = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        val strategyRow1 = MaterialButtonToggleGroup(this).apply {
+            isSingleSelection = true
+            isSelectionRequired = false
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+        val strategyRow2 = MaterialButtonToggleGroup(this).apply {
+            isSingleSelection = true
+            isSelectionRequired = false
+            val params = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            params.setMargins(0, dp(4), 0, 0)
+            layoutParams = params
+        }
+
+        val btnHardware = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            id = strategyHardwareId
+            text = "Hardware"
+            isCheckable = true
+            val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            layoutParams = params
+        }
+        val btnHighPass = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            id = strategyHighPassId
+            text = "High-Pass"
+            isCheckable = true
+            val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            layoutParams = params
+        }
+        val btnAdaptive = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            id = strategyAdaptiveId
+            text = "Adaptive"
+            isCheckable = true
+            val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            layoutParams = params
+        }
+        val btnCustom = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            id = strategyCustomId
+            text = "Custom"
+            isCheckable = true
+            val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            layoutParams = params
+        }
+
+        strategyRow1.addView(btnHardware)
+        strategyRow1.addView(btnHighPass)
+        strategyRow2.addView(btnAdaptive)
+        strategyRow2.addView(btnCustom)
+        strategyRow1.check(strategyHardwareId)
+
+        // Cross-group single selection: selecting in one row clears the other
+        fun onStrategySelected(checkedId: Int) {
+            val isCustomProfile = checkedId == strategyCustomId
+            recordNoiseCard.visibility = if (isCustomProfile) View.VISIBLE else View.GONE
+
+            if (!isRunning) return
+            val strategy = when (checkedId) {
+                strategyHardwareId -> "android"
+                strategyHighPassId -> "highpass"
+                strategyAdaptiveId -> "adaptive"
+                strategyCustomId -> "custom"
+                else -> "android"
+            }
+            val intent = Intent(this@MainActivity, AudioForegroundService::class.java).apply {
+                action = AudioForegroundService.ACTION_SET_LIGHT_STRATEGY
+                putExtra(AudioForegroundService.EXTRA_LIGHT_STRATEGY, strategy)
+            }
+            startService(intent)
+        }
+
+        var suppressCrossGroupClear = false
+        strategyRow1.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (!isChecked || suppressCrossGroupClear) return@addOnButtonCheckedListener
+            suppressCrossGroupClear = true
+            strategyRow2.clearChecked()
+            suppressCrossGroupClear = false
+            onStrategySelected(checkedId)
+        }
+        strategyRow2.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (!isChecked || suppressCrossGroupClear) return@addOnButtonCheckedListener
+            suppressCrossGroupClear = true
+            strategyRow1.clearChecked()
+            suppressCrossGroupClear = false
+            onStrategySelected(checkedId)
+        }
+
+        strategyGrid.addView(strategyRow1)
+        strategyGrid.addView(strategyRow2)
+        strategyContent.addView(strategyGrid)
+        strategyCard.addView(strategyContent)
+
+        // ── Post-Processing Switch Row ──
+        val postFilterCard = createCard()
+        val postFilterRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+        }
+        val postFilterLabel = TextView(this).apply {
+            text = "Post-Processing"
+            setTextColor(textPrimary)
+            textSize = 15f
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        postFilterSwitch = MaterialSwitch(this).apply {
             isChecked = false
             setOnCheckedChangeListener { _, isChecked ->
                 if (!isRunning) return@setOnCheckedChangeListener
@@ -173,85 +489,64 @@ class MainActivity : AppCompatActivity() {
                 startService(intent)
             }
         }
+        postFilterRow.addView(postFilterLabel)
+        postFilterRow.addView(postFilterSwitch)
+        postFilterCard.addView(postFilterRow)
 
-        applyParamsButton = Button(this).apply {
-            text = "Apply Gain/Volume"
-            isEnabled = false
-            setOnClickListener { onApplyParamsClicked() }
+        // ── Record Noise Card ──
+        recordNoiseCard = createCard().apply {
+            visibility = View.GONE
         }
-
-        startStopButton = Button(this).apply {
-            text = "Start"
-            setOnClickListener { onStartStopClicked() }
-            // Make button 1.5x height
-            val buttonHeight = (48 * 1.5 * resources.displayMetrics.density).toInt()
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                buttonHeight
-            )
-            // Soft green color for start
-            setBackgroundColor(0xFF90EE90.toInt())  // Light green
-            setTextColor(0xFF000000.toInt())  // Black text
-        }
-
-        // Create horizontal layout for Export and Clear Logs buttons
-        val logsButtonsRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
+        val recordContent = createCardContent()
+        recordContent.addView(createCardTitle("NOISE PROFILE"))
+        recordNoiseButton = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            text = "Record Noise (5s)"
+            setTextColor(accentTeal)
+            strokeColor = ColorStateList.valueOf(accentTeal)
+            cornerRadius = dp(20)
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
-        }
-
-        exportButton = Button(this).apply {
-            text = "Export Logs"
-            setOnClickListener { exportLogsToday() }
-            val params = LinearLayout.LayoutParams(
-                0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                1f
-            )
-            params.setMargins(0, 0, 8, 0)  // 8dp right margin
-            layoutParams = params
-        }
-
-        clearLogsButton = Button(this).apply {
-            text = "Clear Logs"
-            setOnClickListener { clearLogsToday() }
-            val params = LinearLayout.LayoutParams(
-                0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                1f
-            )
-            params.setMargins(8, 0, 0, 0)  // 8dp left margin
-            layoutParams = params
-        }
-
-        // Add both buttons to the horizontal row
-        logsButtonsRow.addView(exportButton)
-        logsButtonsRow.addView(clearLogsButton)
-
-        // Record Noise button (shown only when LIGHT mode + Custom Profile selected)
-        recordNoiseButton = Button(this).apply {
-            text = "Record Noise (5s)"
-            visibility = View.GONE  // Hidden by default
             setOnClickListener { recordNoiseProfile() }
         }
+        recordContent.addView(recordNoiseButton)
+        recordNoiseCard.addView(recordContent)
 
-        // Add components with 16dp bottom margins for better spacing
-        val marginDp = (16 * resources.displayMetrics.density).toInt()
-        
-        fun View.withMarginBottom(): View {
+        // ── Log Buttons Row ──
+        val logsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
-            params.setMargins(0, 0, 0, marginDp)
-            this.layoutParams = params
-            return this
+            params.setMargins(0, 0, 0, dp(12))
+            layoutParams = params
         }
-        
-        // Version footer
+        exportButton = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            text = "Export Logs"
+            setTextColor(textSecondary)
+            strokeColor = ColorStateList.valueOf(0xFF444444.toInt())
+            cornerRadius = dp(20)
+            val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            params.setMargins(0, 0, dp(6), 0)
+            layoutParams = params
+            setOnClickListener { exportLogsToday() }
+        }
+        clearLogsButton = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            text = "Clear Logs"
+            setTextColor(textSecondary)
+            strokeColor = ColorStateList.valueOf(0xFF444444.toInt())
+            cornerRadius = dp(20)
+            val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            params.setMargins(dp(6), 0, 0, 0)
+            layoutParams = params
+            setOnClickListener { clearLogsToday() }
+        }
+        logsRow.addView(exportButton)
+        logsRow.addView(clearLogsButton)
+
+        // ── Version Footer ──
         val versionFooter = TextView(this).apply {
             try {
                 val versionName = packageManager.getPackageInfo(packageName, 0).versionName
@@ -265,28 +560,58 @@ class MainActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 text = "v1.0.0"
             }
-            setTextColor(0xFF999999.toInt())  // Light gray
-            textSize = 10f
-            gravity = android.view.Gravity.CENTER
-            setPadding(0, marginDp * 2, 0, 0)  // Extra top padding
+            setTextColor(0xFF666666.toInt())
+            textSize = 11f
+            gravity = Gravity.CENTER
+            setPadding(0, dp(16), 0, 0)
         }
 
-        rootLayout.addView(gainLabel)
-        rootLayout.addView(gainInput.withMarginBottom())
-        rootLayout.addView(volLabel)
-        rootLayout.addView(volumeInput.withMarginBottom())
-        rootLayout.addView(applyParamsButton.withMarginBottom())
-        rootLayout.addView(modeLabel)
-        rootLayout.addView(modeGroup.withMarginBottom())
-        rootLayout.addView(strategyLabel)  // Only visible in LIGHT mode
-        rootLayout.addView(strategyGroup.withMarginBottom())  // Only visible in LIGHT mode
-        rootLayout.addView(postFilterCheck.withMarginBottom())
-        rootLayout.addView(startStopButton.withMarginBottom())
-        rootLayout.addView(logsButtonsRow.withMarginBottom())
-        rootLayout.addView(recordNoiseButton.withMarginBottom())  // Only visible when Custom Profile selected
-        rootLayout.addView(versionFooter)
+        // ── Assemble content ──
+        contentLayout.addView(header)
+        contentLayout.addView(subtitle)
+        contentLayout.addView(gainCard)
+        contentLayout.addView(volumeCard)
+        contentLayout.addView(modeCard)
+        contentLayout.addView(strategyCard)
+        contentLayout.addView(postFilterCard)
+        contentLayout.addView(recordNoiseCard)
+        contentLayout.addView(logsRow)
+        contentLayout.addView(versionFooter)
 
-        setContentView(rootLayout)
+        scrollView.addView(contentLayout)
+        root.addView(scrollView)
+
+        // ── Floating Start/Stop Button ──
+        startStopFab = MaterialButton(this).apply {
+            text = "Start"
+            setTextColor(Color.WHITE)
+            textSize = 18f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            backgroundTintList = ColorStateList.valueOf(startGreen)
+            cornerRadius = dp(36)
+            elevation = dpf(8)
+            val size = dp(72)
+            val fabParams = FrameLayout.LayoutParams(dp(200), size)
+            fabParams.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            fabParams.setMargins(0, 0, 0, dp(24))
+            layoutParams = fabParams
+            insetTop = 0
+            insetBottom = 0
+            setOnClickListener { onStartStopClicked() }
+        }
+
+        // Apply bottom inset to FAB
+        ViewCompat.setOnApplyWindowInsetsListener(startStopFab) { v, insets ->
+            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            val fabParams = v.layoutParams as FrameLayout.LayoutParams
+            fabParams.setMargins(0, 0, 0, dp(24) + systemBars.bottom)
+            v.layoutParams = fabParams
+            insets
+        }
+
+        root.addView(startStopFab)
+
+        setContentView(root)
     }
 
     private fun onStartStopClicked() {
@@ -295,54 +620,45 @@ class MainActivity : AppCompatActivity() {
                 requestNeededPermissions()
                 return
             }
-            val gainValue = gainInput.text.toString().ifBlank { "100" }.toInt()
-            val volValue = volumeInput.text.toString().ifBlank { "100" }.toInt()
-            val selectedMode = when (modeGroup.checkedRadioButtonId) {
-                -1 -> "LIGHT"
-                else -> {
-                    val btn = findViewById<RadioButton>(modeGroup.checkedRadioButtonId)
-                    when (btn.text.toString()) {
-                        "Off" -> "OFF"
-                        "Extreme" -> "EXTREME"
-                        else -> "LIGHT"
-                    }
-                }
+            val gainValue = gainValueInput.text.toString().ifBlank { "100" }.toInt()
+            val volValue = volumeValueInput.text.toString().ifBlank { "100" }.toInt()
+            val selectedMode = when (modeToggleGroup.checkedButtonId) {
+                modeOffId -> "OFF"
+                modeExtremeId -> "EXTREME"
+                else -> "LIGHT"
             }
             val service = Intent(this, AudioForegroundService::class.java).apply {
                 action = AudioForegroundService.ACTION_START
                 putExtra(AudioForegroundService.EXTRA_GAIN_100X, gainValue)
                 putExtra(AudioForegroundService.EXTRA_VOL_100X, volValue)
                 putExtra(AudioForegroundService.EXTRA_MODE, selectedMode)
-                putExtra(AudioForegroundService.EXTRA_POST_FILTER_ENABLED, postFilterCheck.isChecked)
+                putExtra(AudioForegroundService.EXTRA_POST_FILTER_ENABLED, postFilterSwitch.isChecked)
             }
             ContextCompat.startForegroundService(this, service)
             isRunning = true
-            startStopButton.text = "Stop"
-            startStopButton.setBackgroundColor(0xFFFF6347.toInt())  // Soft tomato red
-            applyParamsButton.isEnabled = true
+            startStopFab.text = "Stop"
+            startStopFab.backgroundTintList = ColorStateList.valueOf(stopRed)
         } else {
             val service = Intent(this, AudioForegroundService::class.java).apply {
                 action = AudioForegroundService.ACTION_STOP
             }
             startService(service)
             isRunning = false
-            startStopButton.text = "Start"
-            startStopButton.setBackgroundColor(0xFF90EE90.toInt())  // Light green
-            applyParamsButton.isEnabled = false
+            startStopFab.text = "Start"
+            startStopFab.backgroundTintList = ColorStateList.valueOf(startGreen)
         }
     }
 
-    private fun onApplyParamsClicked() {
+    private fun autoApplyParams() {
         if (!isRunning) return
-        val gainValue = gainInput.text.toString().ifBlank { "100" }.toIntOrNull() ?: 100
-        val volValue = volumeInput.text.toString().ifBlank { "100" }.toIntOrNull() ?: 100
+        val gainValue = gainValueInput.text.toString().ifBlank { "100" }.toIntOrNull() ?: 100
+        val volValue = volumeValueInput.text.toString().ifBlank { "100" }.toIntOrNull() ?: 100
         val intent = Intent(this, AudioForegroundService::class.java).apply {
             action = AudioForegroundService.ACTION_SET_PARAMS
             putExtra(AudioForegroundService.EXTRA_GAIN_100X, gainValue)
             putExtra(AudioForegroundService.EXTRA_VOL_100X, volValue)
         }
         startService(intent)
-        Toast.makeText(this, "Updated: Gain=$gainValue%, Vol=$volValue%", Toast.LENGTH_SHORT).show()
     }
 
     private fun clearLogsToday() {
@@ -355,60 +671,53 @@ class MainActivity : AppCompatActivity() {
         try {
             var deletedCount = 0
 
-            // DELETE all hearing_log_*.txt files
             logsDir.listFiles { file -> file.name.startsWith("hearing_log_") && file.extension == "txt" }
                 ?.forEach { file ->
                     try {
                         file.delete()
                         deletedCount++
-                    } catch (e: Throwable) {
-                        // Skip this file
-                    }
+                    } catch (e: Throwable) { }
                 }
 
-            // DELETE noise_profile.txt file
             val noiseFile = File(logsDir, "noise_profile.txt")
             if (noiseFile.exists()) {
                 noiseFile.delete()
                 deletedCount++
             }
 
-            Toast.makeText(this, "Deleted $deletedCount log file(s) (hearing logs + noise profile)", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Deleted $deletedCount log file(s)", Toast.LENGTH_LONG).show()
         } catch (e: Throwable) {
             Toast.makeText(this, "Clear failed: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
-    
+
     private fun recordNoiseProfile() {
         if (isRecordingNoise) {
             Toast.makeText(this, "Already recording noise profile", Toast.LENGTH_SHORT).show()
             return
         }
-        
+
         if (!hasMicPermission()) {
             requestNeededPermissions()
             Toast.makeText(this, "Need microphone permission", Toast.LENGTH_SHORT).show()
             return
         }
-        
+
         isRecordingNoise = true
         recordNoiseButton.isEnabled = false
         recordNoiseButton.text = "Recording..."
-        
-        // Record in background thread
+
         Thread {
             try {
                 val logsDir = File(getExternalFilesDir(null), "logs")
                 if (!logsDir.exists()) logsDir.mkdirs()
-                
-                // Use fixed filename to overwrite old recordings (no timestamp = single file)
+
                 val noiseFile = File(logsDir, "noise_profile.txt")
-                
-                // Record 5 seconds of audio (48000 Hz, 100ms chunks = 50 chunks)
+
                 val sampleRate = 48000
-                val chunkSize = 4800  // 100ms at 48kHz
-                val numChunks = 50    // 5 seconds
-                
+                val chunkSize = 4800
+                val numChunks = 50
+
                 val recorder = android.media.AudioRecord(
                     android.media.MediaRecorder.AudioSource.MIC,
                     sampleRate,
@@ -416,22 +725,21 @@ class MainActivity : AppCompatActivity() {
                     android.media.AudioFormat.ENCODING_PCM_16BIT,
                     chunkSize * 4
                 )
-                
+
                 recorder.startRecording()
-                
+
                 val writer = noiseFile.bufferedWriter()
                 writer.write("# Noise Profile Recording\n")
                 writer.write("# Sample Rate: $sampleRate Hz\n")
                 writer.write("# Chunk Size: $chunkSize samples (100ms)\n")
                 writer.write("# Format: chunk_number,rms,peak,samples...\n")
                 writer.write("#\n")
-                
+
                 val buffer = ShortArray(chunkSize)
-                
+
                 for (chunk in 0 until numChunks) {
                     val read = recorder.read(buffer, 0, buffer.size)
                     if (read > 0) {
-                        // Calculate RMS and peak
                         var sum = 0.0
                         var peak = 0
                         for (i in 0 until read) {
@@ -440,39 +748,34 @@ class MainActivity : AppCompatActivity() {
                             if (kotlin.math.abs(sample) > peak) peak = kotlin.math.abs(sample)
                         }
                         val rms = kotlin.math.sqrt(sum / read)
-                        
-                        // Write chunk info
+
                         writer.write("$chunk,$rms,$peak")
-                        
-                        // Write first 100 samples for frequency analysis
                         for (i in 0 until minOf(100, read)) {
                             writer.write(",${buffer[i]}")
                         }
                         writer.write("\n")
                     }
-                    
-                    // Update progress on UI thread
+
                     val progress = ((chunk + 1) * 100 / numChunks)
                     runOnUiThread {
                         recordNoiseButton.text = "Recording... $progress%"
                     }
                 }
-                
+
                 writer.close()
                 recorder.stop()
                 recorder.release()
-                
-                // Success!
+
                 runOnUiThread {
-                    recordNoiseButton.text = "Record Noise Profile (5s)"
+                    recordNoiseButton.text = "Record Noise (5s)"
                     recordNoiseButton.isEnabled = true
                     isRecordingNoise = false
                     Toast.makeText(this, "Noise profile saved: ${noiseFile.name}", Toast.LENGTH_LONG).show()
                 }
-                
+
             } catch (e: Throwable) {
                 runOnUiThread {
-                    recordNoiseButton.text = "Record Noise Profile (5s)"
+                    recordNoiseButton.text = "Record Noise (5s)"
                     recordNoiseButton.isEnabled = true
                     isRecordingNoise = false
                     Toast.makeText(this, "Recording failed: ${e.message}", Toast.LENGTH_LONG).show()
@@ -487,19 +790,18 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "No logs directory found", Toast.LENGTH_SHORT).show()
             return
         }
-        
-        // Get all .txt files from logs directory
+
         val files = srcDir.listFiles { file -> file.extension == "txt" }
         if (files == null || files.isEmpty()) {
             Toast.makeText(this, "No log files found", Toast.LENGTH_SHORT).show()
             return
         }
-        
+
         val resolver = contentResolver
         val destDirName = "HearingAidLogs"
         var exportCount = 0
         var errorCount = 0
-        
+
         try {
             for (file in files) {
                 try {
@@ -528,7 +830,7 @@ class MainActivity : AppCompatActivity() {
                     errorCount++
                 }
             }
-            
+
             val message = if (errorCount == 0) {
                 "Exported $exportCount file(s) to Downloads/$destDirName"
             } else {
@@ -555,4 +857,3 @@ class MainActivity : AppCompatActivity() {
         requestPermission.launch(perms.toTypedArray())
     }
 }
-

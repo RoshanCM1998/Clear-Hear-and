@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Surface colors -->
+    <color name="surface_dark">#121212</color>
+    <color name="surface_card">#1E1E1E</color>
+    <color name="surface_card_elevated">#252525</color>
+
+    <!-- Accent / Primary -->
+    <color name="accent_teal">#7A9BA5</color>
+    <color name="accent_teal_dim">#4E6970</color>
+
+    <!-- Start / Stop -->
+    <color name="start_green">#5B8C5A</color>
+    <color name="stop_red">#9E5555</color>
+
+    <!-- Text -->
+    <color name="text_primary">#FFFFFFFF</color>
+    <color name="text_secondary">#B3FFFFFF</color>
+    <color name="text_hint">#80FFFFFF</color>
+
+    <!-- Material theme slots -->
+    <color name="md_primary">#7A9BA5</color>
+    <color name="md_on_primary">#1A2C31</color>
+    <color name="md_primary_container">#3D5A63</color>
+    <color name="md_on_primary_container">#C4D8DD</color>
+    <color name="md_secondary">#A0B8BE</color>
+    <color name="md_on_secondary">#1B2D31</color>
+    <color name="md_surface">#121212</color>
+    <color name="md_on_surface">#E0E0E0</color>
+    <color name="md_surface_variant">#1E1E1E</color>
+    <color name="md_on_surface_variant">#C0C0C0</color>
+</resources>
