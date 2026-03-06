@@ -630,18 +630,26 @@ class MainActivity : AppCompatActivity() {
         // Current active bands for initial slider values
         val activeBands = if (eqModeMultiplier) eqMultiplierBands else eqAdditiveBands
 
-        val eqRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
+        val eqScrollView = HorizontalScrollView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
+            isHorizontalScrollBarEnabled = false
+        }
+        val eqRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
         }
         for (i in 0 until 6) {
+            val minColWidth = dp(60)
             val col = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER_HORIZONTAL
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                layoutParams = LinearLayout.LayoutParams(minColWidth, LinearLayout.LayoutParams.WRAP_CONTENT)
             }
 
             val bandIndex = i
@@ -758,7 +766,8 @@ class MainActivity : AppCompatActivity() {
             col.addView(freqLabel)
             eqRow.addView(col)
         }
-        eqContent.addView(eqRow)
+        eqScrollView.addView(eqRow)
+        eqContent.addView(eqScrollView)
 
         // Reset EQ button
         val resetEqButton = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
