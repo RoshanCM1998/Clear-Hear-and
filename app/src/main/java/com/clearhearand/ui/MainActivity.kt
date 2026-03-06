@@ -17,6 +17,7 @@ import android.provider.MediaStore
 import android.text.InputFilter
 import android.text.InputType
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.*
@@ -74,9 +75,10 @@ class MainActivity : AppCompatActivity() {
     private var activeProfile = 1
     private val profileButtons = arrayOfNulls<MaterialButton>(5)
     private val eqSliders = arrayOfNulls<Slider>(6)
-    private val eqLabels = arrayOfNulls<TextView>(6)
+    private val eqInputs = arrayOfNulls<EditText>(6)
     private val eqFreqNames = arrayOf("250", "500", "1k", "2k", "4k", "8k")
     private var updatingFromProfile = false
+    private val updatingEqFromSlider = BooleanArray(6)
 
     // Dual-mode EQ
     private val eqAdditiveBands = FloatArray(6)   // dB values, default 0
@@ -630,18 +632,69 @@ class MainActivity : AppCompatActivity() {
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             }
 
-            // Value label
-            val valLabel = TextView(this).apply {
-                text = formatEqLabel(activeBands[i])
+            val bandIndex = i
+
+            // Editable value input
+            val valInput = EditText(this).apply {
+                setText(formatEqValue(activeBands[i]))
                 setTextColor(textPrimary)
                 textSize = 11f
                 gravity = Gravity.CENTER
+                inputType = if (eqModeMultiplier)
+                    InputType.TYPE_CLASS_NUMBER
+                else
+                    InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_SIGNED
+                filters = arrayOf(InputFilter.LengthFilter(4))
+                background = GradientDrawable().apply {
+                    setStroke((1 * density).toInt(), 0xFF444444.toInt())
+                    cornerRadius = 6 * density
+                }
+                setPadding(dp(4), dp(4), dp(4), dp(4))
+                minWidth = dp(44)
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
             }
-            eqLabels[i] = valLabel
+            valInput.addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                override fun afterTextChanged(s: android.text.Editable?) {
+                    if (updatingEqFromSlider[bandIndex]) return
+                    val v = s?.toString()?.toFloatOrNull() ?: return
+                    val slider = eqSliders[bandIndex] ?: return
+                    val clamped = v.coerceIn(slider.valueFrom, slider.valueTo)
+                    // Snap to step
+                    val step = slider.stepSize
+                    val snapped = if (step > 0) (Math.round(clamped / step) * step) else clamped
+                    if (eqModeMultiplier) {
+                        eqMultiplierBands[bandIndex] = snapped
+                    } else {
+                        eqAdditiveBands[bandIndex] = snapped
+                    }
+                    if (snapped in slider.valueFrom..slider.valueTo) {
+                        slider.value = snapped
+                    }
+                    saveEqToProfile()
+                    autoApplyEq()
+                }
+            })
+            valInput.setOnFocusChangeListener { _, hasFocus ->
+                if (!hasFocus) {
+                    val slider = eqSliders[bandIndex] ?: return@setOnFocusChangeListener
+                    val v = valInput.text.toString().toFloatOrNull() ?: slider.valueFrom
+                    val clamped = v.coerceIn(slider.valueFrom, slider.valueTo)
+                    val step = slider.stepSize
+                    val snapped = if (step > 0) (Math.round(clamped / step) * step) else clamped
+                    updatingEqFromSlider[bandIndex] = true
+                    valInput.setText(formatEqValue(snapped))
+                    updatingEqFromSlider[bandIndex] = false
+                }
+            }
+            eqInputs[i] = valInput
 
-            // Vertical slider: rotation on FrameLayout container, NOT on Slider
+            // Vertical slider: rotation on Slider, touch listener prevents ScrollView interception
             val sliderFrame = FrameLayout(this).apply {
-                rotation = 270f
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
                     dp(180)
@@ -654,6 +707,7 @@ class MainActivity : AppCompatActivity() {
                     valueFrom = -12f; valueTo = 12f; stepSize = 1f
                 }
                 value = activeBands[i]
+                rotation = 270f
                 trackActiveTintList = ColorStateList.valueOf(accentTeal)
                 thumbTintList = ColorStateList.valueOf(accentTeal)
                 trackInactiveTintList = ColorStateList.valueOf(0xFF333333.toInt())
@@ -663,7 +717,14 @@ class MainActivity : AppCompatActivity() {
                     Gravity.CENTER
                 )
             }
-            val bandIndex = i
+            // Prevent ScrollView from stealing vertical drags
+            slider.setOnTouchListener { v, event ->
+                when (event.action) {
+                    MotionEvent.ACTION_DOWN -> v.parent.requestDisallowInterceptTouchEvent(true)
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> v.parent.requestDisallowInterceptTouchEvent(false)
+                }
+                false
+            }
             slider.addOnChangeListener { _, value, fromUser ->
                 if (fromUser) {
                     if (eqModeMultiplier) {
@@ -671,7 +732,9 @@ class MainActivity : AppCompatActivity() {
                     } else {
                         eqAdditiveBands[bandIndex] = value
                     }
-                    valLabel.text = formatEqLabel(value)
+                    updatingEqFromSlider[bandIndex] = true
+                    valInput.setText(formatEqValue(value))
+                    updatingEqFromSlider[bandIndex] = false
                     saveEqToProfile()
                     autoApplyEq()
                 }
@@ -687,7 +750,7 @@ class MainActivity : AppCompatActivity() {
                 gravity = Gravity.CENTER
             }
 
-            col.addView(valLabel)
+            col.addView(valInput)
             col.addView(sliderFrame)
             col.addView(freqLabel)
             eqRow.addView(col)
@@ -872,14 +935,7 @@ class MainActivity : AppCompatActivity() {
         startService(intent)
     }
 
-    private fun formatEqLabel(value: Float): String {
-        return if (eqModeMultiplier) {
-            "${value.toInt()}%"
-        } else {
-            val v = value.toInt()
-            if (v > 0) "+$v" else "$v"
-        }
-    }
+    private fun formatEqValue(value: Float): String = value.toInt().toString()
 
     private fun currentEqBands(): FloatArray =
         if (eqModeMultiplier) eqMultiplierBands else eqAdditiveBands
@@ -1034,7 +1090,15 @@ class MainActivity : AppCompatActivity() {
                 slider.stepSize = 1f
             }
             slider.value = bands[i]
-            eqLabels[i]?.text = formatEqLabel(bands[i])
+            updatingEqFromSlider[i] = true
+            eqInputs[i]?.let { input ->
+                input.setText(formatEqValue(bands[i]))
+                input.inputType = if (eqModeMultiplier)
+                    InputType.TYPE_CLASS_NUMBER
+                else
+                    InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_SIGNED
+            }
+            updatingEqFromSlider[i] = false
         }
     }
 
@@ -1043,13 +1107,17 @@ class MainActivity : AppCompatActivity() {
             for (i in 0 until 6) {
                 eqMultiplierBands[i] = 100f
                 eqSliders[i]?.value = 100f
-                eqLabels[i]?.text = formatEqLabel(100f)
+                updatingEqFromSlider[i] = true
+                eqInputs[i]?.setText(formatEqValue(100f))
+                updatingEqFromSlider[i] = false
             }
         } else {
             for (i in 0 until 6) {
                 eqAdditiveBands[i] = 0f
                 eqSliders[i]?.value = 0f
-                eqLabels[i]?.text = formatEqLabel(0f)
+                updatingEqFromSlider[i] = true
+                eqInputs[i]?.setText(formatEqValue(0f))
+                updatingEqFromSlider[i] = false
             }
         }
         saveEqToProfile()
