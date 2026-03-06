@@ -2,7 +2,9 @@ package com.clearhearand.ui
 
 import android.Manifest
 import android.content.ContentValues
+import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Color
@@ -67,6 +69,16 @@ class MainActivity : AppCompatActivity() {
     private var updatingGainFromSlider = false
     private var updatingVolumeFromSlider = false
 
+    // Profiles & EQ
+    private lateinit var prefs: SharedPreferences
+    private var activeProfile = 1
+    private val profileButtons = arrayOfNulls<MaterialButton>(5)
+    private val eqSliders = arrayOfNulls<Slider>(6)
+    private val eqLabels = arrayOfNulls<TextView>(6)
+    private val eqBands = FloatArray(6)
+    private val eqFreqNames = arrayOf("250", "500", "1k", "2k", "4k", "8k")
+    private var updatingFromProfile = false
+
     private val requestPermission = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { _ -> }
@@ -80,8 +92,21 @@ class MainActivity : AppCompatActivity() {
     private val startGreen = 0xFF5B8C5A.toInt()
     private val stopRed = 0xFF9E5555.toInt()
 
+    // Profile button colors
+    private val profileColors = intArrayOf(
+        0xFF5B9EA6.toInt(), // teal
+        0xFFB8965A.toInt(), // amber
+        0xFFA85A5A.toInt(), // coral
+        0xFF8A7EB8.toInt(), // lavender
+        0xFF5B8C5A.toInt()  // green
+    )
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // SharedPreferences
+        prefs = getSharedPreferences("clear_hear_prefs", Context.MODE_PRIVATE)
+        activeProfile = prefs.getInt("active_profile", 1)
 
         // Edge-to-edge
         WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -219,12 +244,19 @@ class MainActivity : AppCompatActivity() {
             return Triple(row, slider, input)
         }
 
+        // ── Load saved values from active profile ──
+        val savedGain = prefs.getInt("last_gain", prefs.getInt("profile_${activeProfile}_gain", 100)).toFloat()
+        val savedVolume = prefs.getInt("last_volume", prefs.getInt("profile_${activeProfile}_volume", 100)).toFloat()
+        for (i in 0 until 6) {
+            eqBands[i] = prefs.getFloat("profile_${activeProfile}_eq_$i", 0f)
+        }
+
         // ── Audio Gain Card ──
         val gainCard = createCard()
         val gainContent = createCardContent()
         gainContent.addView(createCardTitle("AUDIO GAIN"))
 
-        val (gainRow, gSlider, gInput) = createSliderRow(100f, {}, {})
+        val (gainRow, gSlider, gInput) = createSliderRow(savedGain, {}, {})
         gainSlider = gSlider
         gainValueInput = gInput
 
@@ -258,7 +290,7 @@ class MainActivity : AppCompatActivity() {
         val volumeContent = createCardContent()
         volumeContent.addView(createCardTitle("MASTER VOLUME"))
 
-        val (volumeRow, vSlider, vInput) = createSliderRow(100f, {}, {})
+        val (volumeRow, vSlider, vInput) = createSliderRow(savedVolume, {}, {})
         volumeSlider = vSlider
         volumeValueInput = vInput
 
@@ -513,6 +545,127 @@ class MainActivity : AppCompatActivity() {
         recordContent.addView(recordNoiseButton)
         recordNoiseCard.addView(recordContent)
 
+        // ── Profiles Card ──
+        val profileCard = createCard()
+        val profileContent = createCardContent()
+        profileContent.addView(createCardTitle("PROFILES"))
+
+        val profileRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+        for (i in 0 until 5) {
+            val profileNum = i + 1
+            val btn = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                text = "$profileNum"
+                isCheckable = false
+                val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                params.setMargins(if (i > 0) dp(4) else 0, 0, 0, 0)
+                layoutParams = params
+                setOnClickListener { switchProfile(profileNum) }
+            }
+            profileButtons[i] = btn
+            profileRow.addView(btn)
+        }
+        updateProfileButtonStyles()
+        profileContent.addView(profileRow)
+        profileCard.addView(profileContent)
+
+        // ── Equalizer Card ──
+        val eqCard = createCard()
+        val eqContent = createCardContent()
+        eqContent.addView(createCardTitle("EQUALIZER"))
+
+        val eqRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+        for (i in 0 until 6) {
+            val col = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+
+            // dB label
+            val dbLabel = TextView(this).apply {
+                text = formatDb(eqBands[i])
+                setTextColor(textPrimary)
+                textSize = 11f
+                gravity = Gravity.CENTER
+            }
+            eqLabels[i] = dbLabel
+
+            // Vertical slider in a fixed-height FrameLayout
+            val sliderFrame = FrameLayout(this).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    dp(180)
+                )
+            }
+            val slider = Slider(this).apply {
+                valueFrom = -12f
+                valueTo = 12f
+                value = eqBands[i]
+                stepSize = 1f
+                rotation = 270f
+                trackActiveTintList = ColorStateList.valueOf(accentTeal)
+                thumbTintList = ColorStateList.valueOf(accentTeal)
+                trackInactiveTintList = ColorStateList.valueOf(0xFF333333.toInt())
+                layoutParams = FrameLayout.LayoutParams(
+                    dp(180),
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.CENTER
+                )
+            }
+            val bandIndex = i
+            slider.addOnChangeListener { _, value, fromUser ->
+                if (fromUser) {
+                    eqBands[bandIndex] = value
+                    dbLabel.text = formatDb(value)
+                    saveEqToProfile()
+                    autoApplyEq()
+                }
+            }
+            eqSliders[i] = slider
+            sliderFrame.addView(slider)
+
+            // Frequency label
+            val freqLabel = TextView(this).apply {
+                text = eqFreqNames[i]
+                setTextColor(textSecondary)
+                textSize = 11f
+                gravity = Gravity.CENTER
+            }
+
+            col.addView(dbLabel)
+            col.addView(sliderFrame)
+            col.addView(freqLabel)
+            eqRow.addView(col)
+        }
+        eqContent.addView(eqRow)
+
+        // Reset EQ button
+        val resetEqButton = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            text = "Reset EQ"
+            setTextColor(textSecondary)
+            strokeColor = ColorStateList.valueOf(0xFF444444.toInt())
+            cornerRadius = dp(20)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, dp(8), 0, 0) }
+            setOnClickListener { resetEq() }
+        }
+        eqContent.addView(resetEqButton)
+        eqCard.addView(eqContent)
+
         // ── Log Buttons Row ──
         val logsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -575,6 +728,8 @@ class MainActivity : AppCompatActivity() {
         contentLayout.addView(strategyCard)
         contentLayout.addView(postFilterCard)
         contentLayout.addView(recordNoiseCard)
+        contentLayout.addView(profileCard)
+        contentLayout.addView(eqCard)
         contentLayout.addView(logsRow)
         contentLayout.addView(versionFooter)
 
@@ -633,6 +788,7 @@ class MainActivity : AppCompatActivity() {
                 putExtra(AudioForegroundService.EXTRA_VOL_100X, volValue)
                 putExtra(AudioForegroundService.EXTRA_MODE, selectedMode)
                 putExtra(AudioForegroundService.EXTRA_POST_FILTER_ENABLED, postFilterSwitch.isChecked)
+                putExtra(AudioForegroundService.EXTRA_EQ_BANDS, eqBands.clone())
             }
             ContextCompat.startForegroundService(this, service)
             isRunning = true
@@ -650,15 +806,131 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun autoApplyParams() {
-        if (!isRunning) return
         val gainValue = gainValueInput.text.toString().ifBlank { "100" }.toIntOrNull() ?: 100
         val volValue = volumeValueInput.text.toString().ifBlank { "100" }.toIntOrNull() ?: 100
+
+        // Persist last-used values and active profile
+        if (!updatingFromProfile) {
+            prefs.edit()
+                .putInt("last_gain", gainValue)
+                .putInt("last_volume", volValue)
+                .putInt("profile_${activeProfile}_gain", gainValue)
+                .putInt("profile_${activeProfile}_volume", volValue)
+                .apply()
+        }
+
+        if (!isRunning) return
         val intent = Intent(this, AudioForegroundService::class.java).apply {
             action = AudioForegroundService.ACTION_SET_PARAMS
             putExtra(AudioForegroundService.EXTRA_GAIN_100X, gainValue)
             putExtra(AudioForegroundService.EXTRA_VOL_100X, volValue)
         }
         startService(intent)
+    }
+
+    private fun formatDb(value: Float): String {
+        val v = value.toInt()
+        return when {
+            v > 0 -> "+$v"
+            else -> "$v"
+        }
+    }
+
+    private fun updateProfileButtonStyles() {
+        for (i in 0 until 5) {
+            val btn = profileButtons[i] ?: continue
+            val color = profileColors[i]
+            if (i + 1 == activeProfile) {
+                btn.backgroundTintList = ColorStateList.valueOf(color)
+                btn.setTextColor(Color.WHITE)
+                btn.strokeWidth = 0
+            } else {
+                btn.backgroundTintList = ColorStateList.valueOf(Color.TRANSPARENT)
+                btn.setTextColor(color)
+                btn.strokeColor = ColorStateList.valueOf(color)
+                btn.strokeWidth = (2 * resources.displayMetrics.density).toInt()
+            }
+        }
+    }
+
+    private fun switchProfile(newProfile: Int) {
+        if (newProfile == activeProfile) return
+
+        // Save current values to current profile
+        val gainValue = gainValueInput.text.toString().ifBlank { "100" }.toIntOrNull() ?: 100
+        val volValue = volumeValueInput.text.toString().ifBlank { "100" }.toIntOrNull() ?: 100
+        val editor = prefs.edit()
+        editor.putInt("profile_${activeProfile}_gain", gainValue)
+        editor.putInt("profile_${activeProfile}_volume", volValue)
+        for (i in 0 until 6) {
+            editor.putFloat("profile_${activeProfile}_eq_$i", eqBands[i])
+        }
+
+        // Switch active profile
+        activeProfile = newProfile
+        editor.putInt("active_profile", newProfile)
+        editor.apply()
+
+        // Load new profile values
+        loadProfile(newProfile)
+    }
+
+    private fun loadProfile(profile: Int) {
+        updatingFromProfile = true
+
+        val gain = prefs.getInt("profile_${profile}_gain", 100).toFloat()
+        val volume = prefs.getInt("profile_${profile}_volume", 100).toFloat()
+
+        gainSlider.value = gain.coerceIn(0f, 500f)
+        gainValueInput.setText(gain.toInt().toString())
+        volumeSlider.value = volume.coerceIn(0f, 500f)
+        volumeValueInput.setText(volume.toInt().toString())
+
+        for (i in 0 until 6) {
+            eqBands[i] = prefs.getFloat("profile_${profile}_eq_$i", 0f)
+            eqSliders[i]?.value = eqBands[i]
+            eqLabels[i]?.text = formatDb(eqBands[i])
+        }
+
+        // Save as last-used
+        prefs.edit()
+            .putInt("last_gain", gain.toInt())
+            .putInt("last_volume", volume.toInt())
+            .apply()
+
+        updateProfileButtonStyles()
+        updatingFromProfile = false
+
+        // Apply to running service
+        autoApplyParams()
+        autoApplyEq()
+    }
+
+    private fun saveEqToProfile() {
+        val editor = prefs.edit()
+        for (i in 0 until 6) {
+            editor.putFloat("profile_${activeProfile}_eq_$i", eqBands[i])
+        }
+        editor.apply()
+    }
+
+    private fun autoApplyEq() {
+        if (!isRunning) return
+        val intent = Intent(this, AudioForegroundService::class.java).apply {
+            action = AudioForegroundService.ACTION_SET_EQ_BANDS
+            putExtra(AudioForegroundService.EXTRA_EQ_BANDS, eqBands.clone())
+        }
+        startService(intent)
+    }
+
+    private fun resetEq() {
+        for (i in 0 until 6) {
+            eqBands[i] = 0f
+            eqSliders[i]?.value = 0f
+            eqLabels[i]?.text = formatDb(0f)
+        }
+        saveEqToProfile()
+        autoApplyEq()
     }
 
     private fun clearLogsToday() {
