@@ -3,7 +3,9 @@ package com.clearhearand.audio
 import android.content.Context
 import android.media.*
 import android.util.Log
-import com.clearhearand.audio.dsp.SixBandEqualizer
+import com.clearhearand.audio.dsp.eq.AdditiveEqualizer
+import com.clearhearand.audio.dsp.eq.IEqualizer
+import com.clearhearand.audio.dsp.eq.MultiplierEqualizer
 import com.clearhearand.audio.dsp.lightmode.AdaptiveNoiseGate
 import com.clearhearand.audio.dsp.lightmode.DcBlocker
 import com.clearhearand.audio.logging.AudioLogger
@@ -62,7 +64,8 @@ class AudioProcessor(private val context: Context) {
     private var logger: AudioLogger? = null
 
     // 6-band parametric EQ applied after processor, before post-filter
-    private var equalizer: SixBandEqualizer? = null
+    private var equalizer: IEqualizer? = null
+    @Volatile private var eqModeMultiplier: Boolean = false
 
     // Post-filter: DC Block + Noise Gate applied after volume (catches residual noise)
     @Volatile private var postFilterEnabled: Boolean = false
@@ -78,8 +81,8 @@ class AudioProcessor(private val context: Context) {
 
         logger = AudioLogger(context)
 
-        // Initialize EQ
-        equalizer = SixBandEqualizer(sampleRate)
+        // Initialize EQ based on current mode
+        equalizer = if (eqModeMultiplier) MultiplierEqualizer(sampleRate) else AdditiveEqualizer(sampleRate)
 
         // Initialize post-filter DSP components
         postDcBlocker = DcBlocker(sampleRate, cutoffFreq = 20f)
@@ -162,6 +165,15 @@ class AudioProcessor(private val context: Context) {
     fun setEqBands(bands: FloatArray) {
         equalizer?.setBands(bands)
         Log.d(tag, "EQ bands updated: ${bands.joinToString()}")
+    }
+
+    fun setEqMode(isMultiplier: Boolean) {
+        if (eqModeMultiplier == isMultiplier) return
+        eqModeMultiplier = isMultiplier
+        val oldEq = equalizer
+        equalizer = if (isMultiplier) MultiplierEqualizer(sampleRate) else AdditiveEqualizer(sampleRate)
+        oldEq?.reset()
+        Log.d(tag, "EQ mode switched to ${if (isMultiplier) "Multiplier" else "Additive"}")
     }
 
     fun setPostFilterEnabled(enabled: Boolean) {

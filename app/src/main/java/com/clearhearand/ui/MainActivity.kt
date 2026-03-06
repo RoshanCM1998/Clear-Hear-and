@@ -75,9 +75,15 @@ class MainActivity : AppCompatActivity() {
     private val profileButtons = arrayOfNulls<MaterialButton>(5)
     private val eqSliders = arrayOfNulls<Slider>(6)
     private val eqLabels = arrayOfNulls<TextView>(6)
-    private val eqBands = FloatArray(6)
     private val eqFreqNames = arrayOf("250", "500", "1k", "2k", "4k", "8k")
     private var updatingFromProfile = false
+
+    // Dual-mode EQ
+    private val eqAdditiveBands = FloatArray(6)   // dB values, default 0
+    private val eqMultiplierBands = FloatArray(6) { 100f } // multiplier %, default 100
+    private var eqModeMultiplier = false           // false = additive/dB, true = multiplier/%
+    private lateinit var eqModeSwitch: MaterialSwitch
+    private lateinit var eqModeSwitchLabel: TextView
 
     private val requestPermission = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -247,9 +253,10 @@ class MainActivity : AppCompatActivity() {
         // ── Load saved values from active profile ──
         val savedGain = prefs.getInt("last_gain", prefs.getInt("profile_${activeProfile}_gain", 100)).toFloat()
         val savedVolume = prefs.getInt("last_volume", prefs.getInt("profile_${activeProfile}_volume", 100)).toFloat()
-        for (i in 0 until 6) {
-            eqBands[i] = prefs.getFloat("profile_${activeProfile}_eq_$i", 0f)
-        }
+
+        // Migrate old EQ keys and load dual-mode bands
+        migrateEqKeys()
+        loadEqBandsFromPrefs(activeProfile)
 
         // ── Audio Gain Card ──
         val gainCard = createCard()
@@ -577,7 +584,37 @@ class MainActivity : AppCompatActivity() {
         // ── Equalizer Card ──
         val eqCard = createCard()
         val eqContent = createCardContent()
-        eqContent.addView(createCardTitle("EQUALIZER"))
+
+        // EQ header row: title + mode toggle
+        val eqHeaderRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+        eqHeaderRow.addView(createCardTitle("EQUALIZER").apply {
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        eqModeSwitchLabel = TextView(this).apply {
+            text = if (eqModeMultiplier) "x%" else "dB"
+            setTextColor(accentTeal)
+            textSize = 12f
+            setPadding(0, 0, dp(6), 0)
+        }
+        eqModeSwitch = MaterialSwitch(this).apply {
+            isChecked = eqModeMultiplier
+            setOnCheckedChangeListener { _, isChecked ->
+                onEqModeToggled(isChecked)
+            }
+        }
+        eqHeaderRow.addView(eqModeSwitchLabel)
+        eqHeaderRow.addView(eqModeSwitch)
+        eqContent.addView(eqHeaderRow)
+
+        // Current active bands for initial slider values
+        val activeBands = if (eqModeMultiplier) eqMultiplierBands else eqAdditiveBands
 
         val eqRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -593,28 +630,30 @@ class MainActivity : AppCompatActivity() {
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             }
 
-            // dB label
-            val dbLabel = TextView(this).apply {
-                text = formatDb(eqBands[i])
+            // Value label
+            val valLabel = TextView(this).apply {
+                text = formatEqLabel(activeBands[i])
                 setTextColor(textPrimary)
                 textSize = 11f
                 gravity = Gravity.CENTER
             }
-            eqLabels[i] = dbLabel
+            eqLabels[i] = valLabel
 
-            // Vertical slider in a fixed-height FrameLayout
+            // Vertical slider: rotation on FrameLayout container, NOT on Slider
             val sliderFrame = FrameLayout(this).apply {
+                rotation = 270f
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
                     dp(180)
                 )
             }
             val slider = Slider(this).apply {
-                valueFrom = -12f
-                valueTo = 12f
-                value = eqBands[i]
-                stepSize = 1f
-                rotation = 270f
+                if (eqModeMultiplier) {
+                    valueFrom = 0f; valueTo = 500f; stepSize = 5f
+                } else {
+                    valueFrom = -12f; valueTo = 12f; stepSize = 1f
+                }
+                value = activeBands[i]
                 trackActiveTintList = ColorStateList.valueOf(accentTeal)
                 thumbTintList = ColorStateList.valueOf(accentTeal)
                 trackInactiveTintList = ColorStateList.valueOf(0xFF333333.toInt())
@@ -627,8 +666,12 @@ class MainActivity : AppCompatActivity() {
             val bandIndex = i
             slider.addOnChangeListener { _, value, fromUser ->
                 if (fromUser) {
-                    eqBands[bandIndex] = value
-                    dbLabel.text = formatDb(value)
+                    if (eqModeMultiplier) {
+                        eqMultiplierBands[bandIndex] = value
+                    } else {
+                        eqAdditiveBands[bandIndex] = value
+                    }
+                    valLabel.text = formatEqLabel(value)
                     saveEqToProfile()
                     autoApplyEq()
                 }
@@ -644,7 +687,7 @@ class MainActivity : AppCompatActivity() {
                 gravity = Gravity.CENTER
             }
 
-            col.addView(dbLabel)
+            col.addView(valLabel)
             col.addView(sliderFrame)
             col.addView(freqLabel)
             eqRow.addView(col)
@@ -788,7 +831,8 @@ class MainActivity : AppCompatActivity() {
                 putExtra(AudioForegroundService.EXTRA_VOL_100X, volValue)
                 putExtra(AudioForegroundService.EXTRA_MODE, selectedMode)
                 putExtra(AudioForegroundService.EXTRA_POST_FILTER_ENABLED, postFilterSwitch.isChecked)
-                putExtra(AudioForegroundService.EXTRA_EQ_BANDS, eqBands.clone())
+                putExtra(AudioForegroundService.EXTRA_EQ_MODE_MULTIPLIER, eqModeMultiplier)
+                putExtra(AudioForegroundService.EXTRA_EQ_BANDS, currentEqBands().clone())
             }
             ContextCompat.startForegroundService(this, service)
             isRunning = true
@@ -828,13 +872,17 @@ class MainActivity : AppCompatActivity() {
         startService(intent)
     }
 
-    private fun formatDb(value: Float): String {
-        val v = value.toInt()
-        return when {
-            v > 0 -> "+$v"
-            else -> "$v"
+    private fun formatEqLabel(value: Float): String {
+        return if (eqModeMultiplier) {
+            "${value.toInt()}%"
+        } else {
+            val v = value.toInt()
+            if (v > 0) "+$v" else "$v"
         }
     }
+
+    private fun currentEqBands(): FloatArray =
+        if (eqModeMultiplier) eqMultiplierBands else eqAdditiveBands
 
     private fun updateProfileButtonStyles() {
         for (i in 0 until 5) {
@@ -862,9 +910,7 @@ class MainActivity : AppCompatActivity() {
         val editor = prefs.edit()
         editor.putInt("profile_${activeProfile}_gain", gainValue)
         editor.putInt("profile_${activeProfile}_volume", volValue)
-        for (i in 0 until 6) {
-            editor.putFloat("profile_${activeProfile}_eq_$i", eqBands[i])
-        }
+        saveEqBandsToEditor(editor, activeProfile)
 
         // Switch active profile
         activeProfile = newProfile
@@ -886,11 +932,11 @@ class MainActivity : AppCompatActivity() {
         volumeSlider.value = volume.coerceIn(0f, 500f)
         volumeValueInput.setText(volume.toInt().toString())
 
-        for (i in 0 until 6) {
-            eqBands[i] = prefs.getFloat("profile_${profile}_eq_$i", 0f)
-            eqSliders[i]?.value = eqBands[i]
-            eqLabels[i]?.text = formatDb(eqBands[i])
-        }
+        // Load EQ state
+        loadEqBandsFromPrefs(profile)
+        eqModeSwitch.isChecked = eqModeMultiplier
+        eqModeSwitchLabel.text = if (eqModeMultiplier) "x%" else "dB"
+        updateEqSliders()
 
         // Save as last-used
         prefs.edit()
@@ -903,31 +949,108 @@ class MainActivity : AppCompatActivity() {
 
         // Apply to running service
         autoApplyParams()
+        sendEqModeToService()
         autoApplyEq()
     }
 
     private fun saveEqToProfile() {
         val editor = prefs.edit()
-        for (i in 0 until 6) {
-            editor.putFloat("profile_${activeProfile}_eq_$i", eqBands[i])
-        }
+        saveEqBandsToEditor(editor, activeProfile)
         editor.apply()
+    }
+
+    private fun saveEqBandsToEditor(editor: SharedPreferences.Editor, profile: Int) {
+        for (i in 0 until 6) {
+            editor.putFloat("profile_${profile}_eq_additive_$i", eqAdditiveBands[i])
+            editor.putFloat("profile_${profile}_eq_multiplier_$i", eqMultiplierBands[i])
+        }
+        editor.putBoolean("profile_${profile}_eq_mode", eqModeMultiplier)
+    }
+
+    private fun loadEqBandsFromPrefs(profile: Int) {
+        eqModeMultiplier = prefs.getBoolean("profile_${profile}_eq_mode", false)
+        for (i in 0 until 6) {
+            eqAdditiveBands[i] = prefs.getFloat("profile_${profile}_eq_additive_$i", 0f)
+            eqMultiplierBands[i] = prefs.getFloat("profile_${profile}_eq_multiplier_$i", 100f)
+        }
+    }
+
+    private fun migrateEqKeys() {
+        // Migrate old profile_{n}_eq_{i} keys to profile_{n}_eq_additive_{i}
+        for (p in 1..5) {
+            val oldKey = "profile_${p}_eq_0"
+            if (prefs.contains(oldKey) && !prefs.contains("profile_${p}_eq_additive_0")) {
+                val editor = prefs.edit()
+                for (i in 0 until 6) {
+                    val value = prefs.getFloat("profile_${p}_eq_$i", 0f)
+                    editor.putFloat("profile_${p}_eq_additive_$i", value)
+                    editor.putFloat("profile_${p}_eq_multiplier_$i", 100f)
+                    editor.remove("profile_${p}_eq_$i")
+                }
+                editor.putBoolean("profile_${p}_eq_mode", false)
+                editor.apply()
+            }
+        }
     }
 
     private fun autoApplyEq() {
         if (!isRunning) return
         val intent = Intent(this, AudioForegroundService::class.java).apply {
             action = AudioForegroundService.ACTION_SET_EQ_BANDS
-            putExtra(AudioForegroundService.EXTRA_EQ_BANDS, eqBands.clone())
+            putExtra(AudioForegroundService.EXTRA_EQ_BANDS, currentEqBands().clone())
         }
         startService(intent)
     }
 
-    private fun resetEq() {
+    private fun sendEqModeToService() {
+        if (!isRunning) return
+        val intent = Intent(this, AudioForegroundService::class.java).apply {
+            action = AudioForegroundService.ACTION_SET_EQ_MODE
+            putExtra(AudioForegroundService.EXTRA_EQ_MODE_MULTIPLIER, eqModeMultiplier)
+        }
+        startService(intent)
+    }
+
+    private fun onEqModeToggled(isMultiplier: Boolean) {
+        eqModeMultiplier = isMultiplier
+        eqModeSwitchLabel.text = if (isMultiplier) "x%" else "dB"
+        updateEqSliders()
+        saveEqToProfile()
+        sendEqModeToService()
+        autoApplyEq()
+    }
+
+    private fun updateEqSliders() {
+        val bands = currentEqBands()
         for (i in 0 until 6) {
-            eqBands[i] = 0f
-            eqSliders[i]?.value = 0f
-            eqLabels[i]?.text = formatDb(0f)
+            val slider = eqSliders[i] ?: continue
+            if (eqModeMultiplier) {
+                slider.valueFrom = 0f
+                slider.valueTo = 500f
+                slider.stepSize = 5f
+            } else {
+                slider.valueFrom = -12f
+                slider.valueTo = 12f
+                slider.stepSize = 1f
+            }
+            slider.value = bands[i]
+            eqLabels[i]?.text = formatEqLabel(bands[i])
+        }
+    }
+
+    private fun resetEq() {
+        if (eqModeMultiplier) {
+            for (i in 0 until 6) {
+                eqMultiplierBands[i] = 100f
+                eqSliders[i]?.value = 100f
+                eqLabels[i]?.text = formatEqLabel(100f)
+            }
+        } else {
+            for (i in 0 until 6) {
+                eqAdditiveBands[i] = 0f
+                eqSliders[i]?.value = 0f
+                eqLabels[i]?.text = formatEqLabel(0f)
+            }
         }
         saveEqToProfile()
         autoApplyEq()

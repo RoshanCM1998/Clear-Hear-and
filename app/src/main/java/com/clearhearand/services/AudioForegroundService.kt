@@ -26,6 +26,7 @@ class AudioForegroundService : Service() {
         const val ACTION_SET_LIGHT_STRATEGY = "com.clearhearand.action.SET_LIGHT_STRATEGY"
         const val ACTION_SET_POST_FILTER = "com.clearhearand.action.SET_POST_FILTER"
         const val ACTION_SET_EQ_BANDS = "com.clearhearand.action.SET_EQ_BANDS"
+        const val ACTION_SET_EQ_MODE = "com.clearhearand.action.SET_EQ_MODE"
 
         const val EXTRA_GAIN_100X = "extra_gain_100x"
         const val EXTRA_VOL_100X = "extra_vol_100x"
@@ -33,6 +34,7 @@ class AudioForegroundService : Service() {
         const val EXTRA_LIGHT_STRATEGY = "extra_light_strategy" // android | highpass | adaptive | custom
         const val EXTRA_POST_FILTER_ENABLED = "extra_post_filter_enabled"
         const val EXTRA_EQ_BANDS = "extra_eq_bands" // FloatArray(6)
+        const val EXTRA_EQ_MODE_MULTIPLIER = "extra_eq_mode_multiplier" // Boolean
 
         private const val NOTIF_CHANNEL_ID = "clear_hear_and_channel"
         private const val NOTIF_ID = 101
@@ -60,8 +62,10 @@ class AudioForegroundService : Service() {
                 val modeStr = intent.getStringExtra(EXTRA_MODE) ?: "LIGHT"
                 val postFilter = intent.getBooleanExtra(EXTRA_POST_FILTER_ENABLED, false)
                 val eqBands = intent.getFloatArrayExtra(EXTRA_EQ_BANDS)
+                val eqModeMultiplier = intent.getBooleanExtra(EXTRA_EQ_MODE_MULTIPLIER, false)
                 val mode = runCatching { NoiseMode.valueOf(modeStr) }.getOrDefault(NoiseMode.LIGHT)
                 startForeground(NOTIF_ID, buildNotification("Running: $mode"))
+                processor?.setEqMode(eqModeMultiplier)
                 processor?.start(mode, gain100, vol100, postFilter)
                 if (eqBands != null && eqBands.size == 6) {
                     processor?.setEqBands(eqBands)
@@ -95,6 +99,11 @@ class AudioForegroundService : Service() {
                     debugLog("EQ bands: ${bands.joinToString()}")
                     processor?.setEqBands(bands)
                 }
+            }
+            ACTION_SET_EQ_MODE -> {
+                val isMultiplier = intent.getBooleanExtra(EXTRA_EQ_MODE_MULTIPLIER, false)
+                debugLog("EQ mode: ${if (isMultiplier) "Multiplier" else "Additive"}")
+                processor?.setEqMode(isMultiplier)
             }
             ACTION_STOP -> {
                 processor?.stop()
