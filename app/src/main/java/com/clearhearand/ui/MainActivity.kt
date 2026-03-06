@@ -775,9 +775,10 @@ class MainActivity : AppCompatActivity() {
         eqContent.addView(resetEqButton)
         eqCard.addView(eqContent)
 
-        // ── Log Buttons Row ──
+        // ── Log Buttons Row (hidden by default, revealed by tapping build number 5 times) ──
         val logsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
+            visibility = View.GONE
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -826,6 +827,21 @@ class MainActivity : AppCompatActivity() {
             textSize = 11f
             gravity = Gravity.CENTER
             setPadding(0, dp(16), 0, 0)
+            var devTapCount = 0
+            var devToast: Toast? = null
+            setOnClickListener {
+                devTapCount++
+                devToast?.cancel()
+                if (devTapCount >= 5) {
+                    logsRow.visibility = View.VISIBLE
+                    devToast = Toast.makeText(this@MainActivity, "Developer options enabled", Toast.LENGTH_SHORT)
+                    devToast?.show()
+                    devTapCount = 0
+                } else if (devTapCount >= 3) {
+                    devToast = Toast.makeText(this@MainActivity, "${5 - devTapCount} taps to enable developer options", Toast.LENGTH_SHORT)
+                    devToast?.show()
+                }
+            }
         }
 
         // ── Assemble content ──
