@@ -3,12 +3,13 @@ package com.clearhearand.audio
 import android.content.Context
 import android.media.*
 import android.util.Log
+import com.clearhearand.audio.dsp.lightmode.AdaptiveNoiseGate
+import com.clearhearand.audio.dsp.lightmode.DcBlocker
 import com.clearhearand.audio.logging.AudioLogger
 import com.clearhearand.audio.processors.IAudioModeProcessor
 import com.clearhearand.audio.processors.ExtremeModeProcessor
 import com.clearhearand.audio.processors.LightModeProcessor
 import com.clearhearand.audio.processors.OffModeProcessor
-import com.example.audio.RNNoise
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -18,16 +19,16 @@ import kotlin.math.sqrt
 
 /**
  * Noise cancellation modes available to the user.
- * 
+ *
  * Each mode has a corresponding processor implementation in the processors package.
  */
 enum class NoiseMode {
     /** No noise cancellation - pure passthrough */
     OFF,
-    
+
     /** Mild noise reduction using Android built-in effects */
     LIGHT,
-    
+
     /** Strong noise reduction for very noisy environments */
     EXTREME
 }
@@ -48,33 +49,47 @@ class AudioProcessor(private val context: Context) {
     @Volatile private var gainMultiplier: Float = 1.0f
     @Volatile private var volumeMultiplier: Float = 1.0f
 
-    // RNNoise handle (for future use in EXTREME mode if needed)
-    private var rnHandle: Long = 0L
-
     // Audio format - KEEP at 48kHz and 100ms for original quality
-    private val sampleRate = 48000  // Restored to match old code for better quality or 16000
+    private val sampleRate = 48000
     private val channelIn = AudioFormat.CHANNEL_IN_MONO
     private val channelOut = AudioFormat.CHANNEL_OUT_MONO
     private val encoding = AudioFormat.ENCODING_PCM_16BIT
 
     // Strategy pattern: Different processor for each mode
     private var currentProcessor: IAudioModeProcessor = OffModeProcessor()
-    
+
     private var logger: AudioLogger? = null
 
-    fun start(initialMode: NoiseMode = NoiseMode.LIGHT, gain100x: Int = 100, volume100x: Int = 100) {
+    // Post-filter: DC Block + Noise Gate applied after volume (catches residual noise)
+    @Volatile private var postFilterEnabled: Boolean = false
+    private var postDcBlocker: DcBlocker? = null
+    private var postNoiseGate: AdaptiveNoiseGate? = null
+
+    fun start(initialMode: NoiseMode = NoiseMode.LIGHT, gain100x: Int = 100, volume100x: Int = 100, postFilter: Boolean = false) {
         if (isRunning.getAndSet(true)) return
         noiseMode = initialMode
         gainMultiplier = gain100x / 100.0f
         volumeMultiplier = volume100x / 100.0f
+        postFilterEnabled = postFilter
 
         logger = AudioLogger(context)
 
+        // Initialize post-filter DSP components
+        postDcBlocker = DcBlocker(sampleRate, cutoffFreq = 20f)
+        postNoiseGate = AdaptiveNoiseGate(
+            sampleRate = sampleRate,
+            threshold = 50f,
+            attackTime = 0.002f,
+            releaseTime = 0.050f,
+            holdTime = 0.150f,
+            reductionDb = -18f
+        )
+
         setupAudio()
-        
+
         // Create processor for initial mode
         createProcessorForMode(initialMode)
-        
+
         startThreads()
     }
 
@@ -86,11 +101,9 @@ class AudioProcessor(private val context: Context) {
         audioRecord?.release(); audioRecord = null
         audioTrack?.release(); audioTrack = null
         queue.clear()
-        if (rnHandle != 0L) {
-            try { RNNoise.release(rnHandle) } catch (_: Throwable) {}
-            rnHandle = 0L
-        }
         logger?.close(); logger = null
+        postDcBlocker = null
+        postNoiseGate = null
     }
 
     fun setNoiseMode(mode: NoiseMode) {
@@ -102,7 +115,7 @@ class AudioProcessor(private val context: Context) {
         Log.d(tag, "Switching from $oldMode to $mode")
         createProcessorForMode(mode)
     }
-    
+
     /**
      * Create and setup processor for the specified mode
      * Cleans up old processor first
@@ -110,7 +123,7 @@ class AudioProcessor(private val context: Context) {
     private fun createProcessorForMode(mode: NoiseMode) {
         // Cleanup old processor
         currentProcessor.cleanup()
-        
+
         // Create new processor based on mode
         currentProcessor = when (mode) {
             NoiseMode.OFF -> {
@@ -123,10 +136,10 @@ class AudioProcessor(private val context: Context) {
             }
             NoiseMode.EXTREME -> {
                 Log.d(tag, "Created ExtremeModeProcessor")
-                ExtremeModeProcessor()
+                ExtremeModeProcessor(context)
             }
         }
-        
+
         // Setup new processor
         currentProcessor.setup(audioRecord, sampleRate)
         Log.d(tag, "Active processor: ${currentProcessor.getDescription()}")
@@ -137,11 +150,19 @@ class AudioProcessor(private val context: Context) {
         volumeMultiplier = volume100x / 100.0f
         Log.d(tag, "Updated gain=$gainMultiplier, volume=$volumeMultiplier")
     }
-    
+
+    fun setPostFilterEnabled(enabled: Boolean) {
+        postFilterEnabled = enabled
+        // Reset filter state when toggling to avoid artifacts
+        postDcBlocker?.reset()
+        postNoiseGate?.reset()
+        Log.d(tag, "Post-filter ${if (enabled) "enabled" else "disabled"}")
+    }
+
     /**
      * Set the filtering strategy for LIGHT mode.
      * Only applies if currently in LIGHT mode.
-     * 
+     *
      * @param strategyKey Strategy identifier: "android", "highpass", "adaptive", or "custom"
      */
     fun setLightModeStrategy(strategyKey: String) {
@@ -149,7 +170,7 @@ class AudioProcessor(private val context: Context) {
             Log.w(tag, "Cannot set strategy - not in LIGHT mode")
             return
         }
-        
+
         val processor = currentProcessor
         if (processor is LightModeProcessor) {
             processor.setStrategy(strategyKey, audioRecord, sampleRate)
@@ -160,7 +181,7 @@ class AudioProcessor(private val context: Context) {
     private fun setupAudio() {
         val minRec = AudioRecord.getMinBufferSize(sampleRate, channelIn, encoding)
         val minPlay = AudioTrack.getMinBufferSize(sampleRate, channelOut, encoding)
-        val chunkMs = 100 // Restored to 100ms to match old code behavior 20
+        val chunkMs = 100
         val samplesPerChunk = (sampleRate * chunkMs) / 1000
         val bytesPerSample = 2
         val recBufferSize = max(minRec, samplesPerChunk * bytesPerSample)
@@ -205,7 +226,7 @@ class AudioProcessor(private val context: Context) {
         ioExecutor.execute {
             try {
                 rec.startRecording()
-                val samplesPerChunk = (sampleRate * 100) / 1000  // 100ms chunks to match old code
+                val samplesPerChunk = (sampleRate * 100) / 1000
                 val buffer = ShortArray(samplesPerChunk)
                 while (isRunning.get()) {
                     val read = rec.read(buffer, 0, buffer.size)
@@ -225,35 +246,54 @@ class AudioProcessor(private val context: Context) {
         processExecutor.execute {
             try {
                 val track = audioTrack ?: return@execute
-                val outBuffer = ShortArray((sampleRate * 100) / 1000)  // 100ms chunks to match old code
+                val outBuffer = ShortArray((sampleRate * 100) / 1000)
                 while (isRunning.get()) {
                     val inChunk = queue.take()
                     val n = inChunk.size
 
-                    // Use strategy pattern: Current processor handles all processing
                     val gain = gainMultiplier
                     val volume = volumeMultiplier
                     val processor = currentProcessor
-                    
+
                     // Calculate input levels for logging
                     val inRms = calcRms(inChunk)
                     val inPeak = calcPeak(inChunk)
-                    
-                    // Process with current mode's processor
+
+                    // Main processing: Gain → Filter → Volume (handled by each processor)
                     processor.process(inChunk, outBuffer, gain, volume)
-                    
+
+                    // Post-filter: DC Block + Noise Gate (catches volume-amplified residual)
+                    if (postFilterEnabled) {
+                        postDcBlocker?.process(outBuffer)
+                        postNoiseGate?.process(outBuffer)
+                    }
+
                     // Calculate output levels for logging
                     val outRms = calcRms(outBuffer)
                     val outPeak = calcPeak(outBuffer)
-                    
+
+                    // Get post-filter metrics and DFN diagnostics
+                    val afterFilterRms: Float
+                    val afterFilterPeak: Float
+                    val flags: String
+                    if (processor is ExtremeModeProcessor) {
+                        afterFilterRms = processor.lastFilteredRms
+                        afterFilterPeak = processor.lastFilteredPeak
+                        flags = "frameLen=${processor.rawFrameLength};snr=${processor.lastSnr};postFilter=$postFilterEnabled"
+                    } else {
+                        afterFilterRms = inRms * gain
+                        afterFilterPeak = inPeak * gain
+                        flags = "postFilter=$postFilterEnabled"
+                    }
+
                     // Log with processor description
                     logger?.logFrame(
                         noiseMode.name,
                         inRms, inPeak,
-                        inRms * gain, inPeak * gain,
+                        afterFilterRms, afterFilterPeak,
                         outRms, outPeak,
                         "${processor.getDescription()};gain=$gain;vol=$volume",
-                        ""
+                        flags
                     )
 
                     track.write(outBuffer, 0, n, AudioTrack.WRITE_BLOCKING)
@@ -263,10 +303,7 @@ class AudioProcessor(private val context: Context) {
             }
         }
     }
-    
-    /**
-     * Calculate RMS (Root Mean Square) level of PCM16 buffer
-     */
+
     private fun calcRms(buffer: ShortArray): Float {
         if (buffer.isEmpty()) return 0f
         var sum = 0.0
@@ -276,10 +313,7 @@ class AudioProcessor(private val context: Context) {
         }
         return kotlin.math.sqrt(sum / buffer.size).toFloat()
     }
-    
-    /**
-     * Calculate peak level of PCM16 buffer
-     */
+
     private fun calcPeak(buffer: ShortArray): Float {
         if (buffer.isEmpty()) return 0f
         var peak = 0f

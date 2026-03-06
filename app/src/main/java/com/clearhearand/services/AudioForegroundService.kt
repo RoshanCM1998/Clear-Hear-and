@@ -24,11 +24,13 @@ class AudioForegroundService : Service() {
         const val ACTION_SET_MODE = "com.clearhearand.action.SET_MODE"
         const val ACTION_SET_PARAMS = "com.clearhearand.action.SET_PARAMS"
         const val ACTION_SET_LIGHT_STRATEGY = "com.clearhearand.action.SET_LIGHT_STRATEGY"
+        const val ACTION_SET_POST_FILTER = "com.clearhearand.action.SET_POST_FILTER"
 
         const val EXTRA_GAIN_100X = "extra_gain_100x"
         const val EXTRA_VOL_100X = "extra_vol_100x"
         const val EXTRA_MODE = "extra_noise_mode" // OFF | LIGHT | EXTREME
         const val EXTRA_LIGHT_STRATEGY = "extra_light_strategy" // android | highpass | adaptive | custom
+        const val EXTRA_POST_FILTER_ENABLED = "extra_post_filter_enabled"
 
         private const val NOTIF_CHANNEL_ID = "clear_hear_and_channel"
         private const val NOTIF_ID = 101
@@ -54,9 +56,10 @@ class AudioForegroundService : Service() {
                 val gain100 = intent.getIntExtra(EXTRA_GAIN_100X, 100)
                 val vol100 = intent.getIntExtra(EXTRA_VOL_100X, 100)
                 val modeStr = intent.getStringExtra(EXTRA_MODE) ?: "LIGHT"
+                val postFilter = intent.getBooleanExtra(EXTRA_POST_FILTER_ENABLED, false)
                 val mode = runCatching { NoiseMode.valueOf(modeStr) }.getOrDefault(NoiseMode.LIGHT)
                 startForeground(NOTIF_ID, buildNotification("Running: $mode"))
-                processor?.start(mode, gain100, vol100)
+                processor?.start(mode, gain100, vol100, postFilter)
             }
             ACTION_SET_MODE -> {
                 val modeStr = intent.getStringExtra(EXTRA_MODE) ?: return START_STICKY
@@ -74,6 +77,11 @@ class AudioForegroundService : Service() {
                 val strategy = intent.getStringExtra(EXTRA_LIGHT_STRATEGY) ?: "android"
                 debugLog("Updating LIGHT mode strategy: $strategy")
                 processor?.setLightModeStrategy(strategy)
+            }
+            ACTION_SET_POST_FILTER -> {
+                val enabled = intent.getBooleanExtra(EXTRA_POST_FILTER_ENABLED, false)
+                debugLog("Post-filter: $enabled")
+                processor?.setPostFilterEnabled(enabled)
             }
             ACTION_STOP -> {
                 processor?.stop()

@@ -13,6 +13,7 @@ import android.text.InputFilter
 import android.text.InputType
 import android.view.View
 import android.widget.*
+import android.widget.CheckBox
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -36,6 +37,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var recordNoiseButton: Button
     private lateinit var strategyGroup: RadioGroup
     private lateinit var strategyLabel: TextView
+    private lateinit var postFilterCheck: CheckBox
 
     private var isRunning: Boolean = false
     private var isRecordingNoise: Boolean = false
@@ -159,6 +161,19 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        postFilterCheck = CheckBox(this).apply {
+            text = "Post-Filter (DC Block + Noise Gate)"
+            isChecked = false
+            setOnCheckedChangeListener { _, isChecked ->
+                if (!isRunning) return@setOnCheckedChangeListener
+                val intent = Intent(this@MainActivity, AudioForegroundService::class.java).apply {
+                    action = AudioForegroundService.ACTION_SET_POST_FILTER
+                    putExtra(AudioForegroundService.EXTRA_POST_FILTER_ENABLED, isChecked)
+                }
+                startService(intent)
+            }
+        }
+
         applyParamsButton = Button(this).apply {
             text = "Apply Gain/Volume"
             isEnabled = false
@@ -265,6 +280,7 @@ class MainActivity : AppCompatActivity() {
         rootLayout.addView(modeGroup.withMarginBottom())
         rootLayout.addView(strategyLabel)  // Only visible in LIGHT mode
         rootLayout.addView(strategyGroup.withMarginBottom())  // Only visible in LIGHT mode
+        rootLayout.addView(postFilterCheck.withMarginBottom())
         rootLayout.addView(startStopButton.withMarginBottom())
         rootLayout.addView(logsButtonsRow.withMarginBottom())
         rootLayout.addView(recordNoiseButton.withMarginBottom())  // Only visible when Custom Profile selected
@@ -297,6 +313,7 @@ class MainActivity : AppCompatActivity() {
                 putExtra(AudioForegroundService.EXTRA_GAIN_100X, gainValue)
                 putExtra(AudioForegroundService.EXTRA_VOL_100X, volValue)
                 putExtra(AudioForegroundService.EXTRA_MODE, selectedMode)
+                putExtra(AudioForegroundService.EXTRA_POST_FILTER_ENABLED, postFilterCheck.isChecked)
             }
             ContextCompat.startForegroundService(this, service)
             isRunning = true
