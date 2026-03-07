@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace 'com.clearhearand'
+    namespace 'com.clearhear'
     compileSdk 35
 
     defaultConfig {
-        applicationId "com.clearhearand"
+        applicationId "com.clearhear"
         minSdk 26
         targetSdk 35
         versionCode 5

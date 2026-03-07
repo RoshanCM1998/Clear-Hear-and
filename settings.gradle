@@ -14,6 +14,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "clear-hear-and"
+rootProject.name = "clear-hear"
 include(":app")
 

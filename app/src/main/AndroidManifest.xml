@@ -14,11 +14,11 @@
 
     <application
         android:allowBackup="true"
-        android:label="clear-hear-and"
+        android:label="Clear Hear"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.ClearHearAnd">
+        android:theme="@style/Theme.ClearHear">
 
         <service
             android:name=".services.AudioForegroundService"
