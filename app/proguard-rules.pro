@@ -1,3 +1,3 @@
 # Keep service and activity
--keep class com.clearhearand.** { *; }
+-keep class com.clearhear.** { *; }
 
