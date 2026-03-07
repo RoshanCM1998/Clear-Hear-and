@@ -16,9 +16,7 @@ import com.clearhearand.audio.processors.OffModeProcessor
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.abs
-import kotlin.math.max
-import kotlin.math.sqrt
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Noise cancellation modes available to the user.
@@ -40,6 +38,7 @@ class AudioProcessor(private val context: Context) {
     private val tag = "AudioProcessor"
 
     private val isRunning = AtomicBoolean(false)
+    private val generation = AtomicInteger(0)
     private val ioExecutor = Executors.newSingleThreadExecutor()
     private val processExecutor = Executors.newSingleThreadExecutor()
     private val queue = ArrayBlockingQueue<ShortArray>(8)
@@ -52,22 +51,21 @@ class AudioProcessor(private val context: Context) {
     @Volatile private var gainMultiplier: Float = 1.0f
     @Volatile private var volumeMultiplier: Float = 1.0f
 
-    // Audio format - KEEP at 48kHz and 100ms for original quality
+    val deviceManager = AudioDeviceManager(context)
+
+    // Audio format
     private val sampleRate = 48000
     private val channelIn = AudioFormat.CHANNEL_IN_MONO
     private val channelOut = AudioFormat.CHANNEL_OUT_MONO
     private val encoding = AudioFormat.ENCODING_PCM_16BIT
 
-    // Strategy pattern: Different processor for each mode
     private var currentProcessor: IAudioModeProcessor = OffModeProcessor()
 
     private var logger: AudioLogger? = null
 
-    // 6-band parametric EQ applied after processor, before post-filter
     private var equalizer: IEqualizer? = null
     @Volatile private var eqModeMultiplier: Boolean = false
 
-    // Post-filter: DC Block + Noise Gate applied after volume (catches residual noise)
     @Volatile private var postFilterEnabled: Boolean = false
     private var postDcBlocker: DcBlocker? = null
     private var postNoiseGate: AdaptiveNoiseGate? = null
@@ -81,10 +79,8 @@ class AudioProcessor(private val context: Context) {
 
         logger = AudioLogger(context)
 
-        // Initialize EQ based on current mode
         equalizer = if (eqModeMultiplier) MultiplierEqualizer(sampleRate) else AdditiveEqualizer(sampleRate)
 
-        // Initialize post-filter DSP components
         postDcBlocker = DcBlocker(sampleRate, cutoffFreq = 20f)
         postNoiseGate = AdaptiveNoiseGate(
             sampleRate = sampleRate,
@@ -96,10 +92,7 @@ class AudioProcessor(private val context: Context) {
         )
 
         setupAudio()
-
-        // Create processor for initial mode
         createProcessorForMode(initialMode)
-
         startThreads()
     }
 
@@ -115,6 +108,10 @@ class AudioProcessor(private val context: Context) {
         equalizer?.reset(); equalizer = null
         postDcBlocker = null
         postNoiseGate = null
+
+        if (deviceManager.bluetoothScoActive) {
+            deviceManager.stopBluetoothSco()
+        }
     }
 
     fun setNoiseMode(mode: NoiseMode) {
@@ -122,20 +119,13 @@ class AudioProcessor(private val context: Context) {
         noiseMode = mode
         if (!isRunning.get()) return
 
-        // Strategy pattern: Switch to different processor
         Log.d(tag, "Switching from $oldMode to $mode")
         createProcessorForMode(mode)
     }
 
-    /**
-     * Create and setup processor for the specified mode
-     * Cleans up old processor first
-     */
     private fun createProcessorForMode(mode: NoiseMode) {
-        // Cleanup old processor
         currentProcessor.cleanup()
 
-        // Create new processor based on mode
         currentProcessor = when (mode) {
             NoiseMode.OFF -> {
                 Log.d(tag, "Created OffModeProcessor")
@@ -151,7 +141,6 @@ class AudioProcessor(private val context: Context) {
             }
         }
 
-        // Setup new processor
         currentProcessor.setup(audioRecord, sampleRate)
         Log.d(tag, "Active processor: ${currentProcessor.getDescription()}")
     }
@@ -176,20 +165,70 @@ class AudioProcessor(private val context: Context) {
         Log.d(tag, "EQ mode switched to ${if (isMultiplier) "Multiplier" else "Additive"}")
     }
 
+    // ── Device Selection ──
+
+    fun setInputDevice(deviceId: Int?) {
+        deviceManager.setInputDeviceId(deviceId)
+
+        // Always restart the pipeline when changing input device while running.
+        // setPreferredDevice() alone is unreliable — recreating AudioRecord is the
+        // only way to guarantee the new device is actually used.
+        if (isRunning.get()) {
+            Log.d(tag, "Input device changed while running — restarting audio pipeline")
+            restartAudioPipeline()
+        }
+    }
+
+    fun setOutputDevice(deviceId: Int?) {
+        deviceManager.setOutputDeviceId(deviceId)
+
+        // Output device changes work reliably with setPreferredDevice()
+        if (isRunning.get()) {
+            deviceManager.applyOutputDevice(audioTrack)
+        }
+    }
+
+    private fun restartAudioPipeline() {
+        if (!isRunning.get()) return
+        Log.d(tag, "Restarting audio pipeline for device change")
+
+        // Bump generation so old IO/process threads exit their loops
+        val newGen = generation.incrementAndGet()
+        Log.d(tag, "Pipeline generation bumped to $newGen")
+
+        // Stop current audio hardware
+        try { audioRecord?.stop() } catch (_: Throwable) {}
+        try { audioTrack?.stop() } catch (_: Throwable) {}
+        currentProcessor.cleanup()
+        audioRecord?.release(); audioRecord = null
+        audioTrack?.release(); audioTrack = null
+        // Unblock the process thread if it's stuck on queue.take()
+        queue.clear()
+        queue.offer(ShortArray(0)) // sentinel to wake up queue.take()
+
+        if (deviceManager.bluetoothScoActive) {
+            deviceManager.stopBluetoothSco()
+        }
+
+        // Let old threads exit before reusing the executors
+        Thread.sleep(150)
+
+        // Recreate audio with new settings
+        setupAudio()
+        createProcessorForMode(noiseMode)
+        startThreads()
+        Log.d(tag, "Audio pipeline restarted (gen=$newGen)")
+    }
+
+    // ── Other Settings ──
+
     fun setPostFilterEnabled(enabled: Boolean) {
         postFilterEnabled = enabled
-        // Reset filter state when toggling to avoid artifacts
         postDcBlocker?.reset()
         postNoiseGate?.reset()
         Log.d(tag, "Post-filter ${if (enabled) "enabled" else "disabled"}")
     }
 
-    /**
-     * Set the filtering strategy for LIGHT mode.
-     * Only applies if currently in LIGHT mode.
-     *
-     * @param strategyKey Strategy identifier: "android", "highpass", "adaptive", or "custom"
-     */
     fun setLightModeStrategy(strategyKey: String) {
         if (noiseMode != NoiseMode.LIGHT) {
             Log.w(tag, "Cannot set strategy - not in LIGHT mode")
@@ -203,57 +242,30 @@ class AudioProcessor(private val context: Context) {
         }
     }
 
+    // ── Audio Setup ──
+
     private fun setupAudio() {
-        val minRec = AudioRecord.getMinBufferSize(sampleRate, channelIn, encoding)
-        val minPlay = AudioTrack.getMinBufferSize(sampleRate, channelOut, encoding)
-        val chunkMs = 100
-        val samplesPerChunk = (sampleRate * chunkMs) / 1000
-        val bytesPerSample = 2
-        val recBufferSize = max(minRec, samplesPerChunk * bytesPerSample)
-        val playBufferSize = max(minPlay, samplesPerChunk * bytesPerSample)
-
-        audioRecord = AudioRecord.Builder()
-            .setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setSampleRate(sampleRate)
-                    .setEncoding(encoding)
-                    .setChannelMask(channelIn)
-                    .build()
-            )
-            .setBufferSizeInBytes(recBufferSize)
-            .build()
-
-        audioTrack = AudioTrack.Builder()
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build()
-            )
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setSampleRate(sampleRate)
-                    .setEncoding(encoding)
-                    .setChannelMask(channelOut)
-                    .build()
-            )
-            .setTransferMode(AudioTrack.MODE_STREAM)
-            .setBufferSizeInBytes(playBufferSize)
-            .build()
+        val pair = deviceManager.createAudioPair(sampleRate, channelIn, channelOut, encoding)
+        audioRecord = pair.record
+        audioTrack = pair.track
 
         audioTrack?.play()
+        deviceManager.logRoutedDevices(audioRecord, audioTrack)
     }
 
+    // ── Processing Threads ──
 
     private fun startThreads() {
         val rec = audioRecord ?: return
+        val myGen = generation.get()
+        Log.d(tag, "startThreads: gen=$myGen")
+
         ioExecutor.execute {
             try {
                 rec.startRecording()
                 val samplesPerChunk = (sampleRate * 100) / 1000
                 val buffer = ShortArray(samplesPerChunk)
-                while (isRunning.get()) {
+                while (isRunning.get() && generation.get() == myGen) {
                     val read = rec.read(buffer, 0, buffer.size)
                     if (read > 0) {
                         val copy = ShortArray(read)
@@ -263,8 +275,9 @@ class AudioProcessor(private val context: Context) {
                         }
                     }
                 }
+                Log.d(tag, "IO thread exiting (gen=$myGen, current=${generation.get()})")
             } catch (t: Throwable) {
-                Log.e(tag, "Recorder error: ${t.message}")
+                Log.e(tag, "Recorder error (gen=$myGen): ${t.message}")
             }
         }
 
@@ -272,52 +285,51 @@ class AudioProcessor(private val context: Context) {
             try {
                 val track = audioTrack ?: return@execute
                 val outBuffer = ShortArray((sampleRate * 100) / 1000)
-                while (isRunning.get()) {
+                while (isRunning.get() && generation.get() == myGen) {
                     val inChunk = queue.take()
+                    if (inChunk.isEmpty()) {
+                        Log.d(tag, "Process thread got sentinel, exiting (gen=$myGen)")
+                        break
+                    }
                     val n = inChunk.size
 
                     val gain = gainMultiplier
                     val volume = volumeMultiplier
                     val processor = currentProcessor
 
-                    // Calculate input levels for logging
                     val inRms = calcRms(inChunk)
                     val inPeak = calcPeak(inChunk)
 
-                    // Main processing: Gain → Filter → Volume (handled by each processor)
                     processor.process(inChunk, outBuffer, gain, volume)
 
-                    // EQ applied on cleaned signal — preserves all frequency shaping
                     val eq = equalizer
                     if (eq != null && !eq.isFlat()) {
                         eq.process(outBuffer)
                     }
 
-                    // Post-filter: DC Block + Noise Gate (catches volume-amplified residual)
                     if (postFilterEnabled) {
                         postDcBlocker?.process(outBuffer)
                         postNoiseGate?.process(outBuffer)
                     }
 
-                    // Calculate output levels for logging
                     val outRms = calcRms(outBuffer)
                     val outPeak = calcPeak(outBuffer)
 
-                    // Get post-filter metrics and DFN diagnostics
                     val afterFilterRms: Float
                     val afterFilterPeak: Float
                     val flags: String
+                    val routingFlags = deviceManager.getRoutingFlags(audioRecord, audioTrack)
+
                     if (processor is ExtremeModeProcessor) {
                         afterFilterRms = processor.lastFilteredRms
                         afterFilterPeak = processor.lastFilteredPeak
-                        flags = "frameLen=${processor.rawFrameLength};snr=${processor.lastSnr};postFilter=$postFilterEnabled"
+                        flags = "frameLen=${processor.rawFrameLength};snr=${processor.lastSnr};postFilter=$postFilterEnabled;$routingFlags"
                     } else {
                         afterFilterRms = inRms * gain
                         afterFilterPeak = inPeak * gain
-                        flags = "postFilter=$postFilterEnabled"
+                        flags = "postFilter=$postFilterEnabled;$routingFlags"
                     }
 
-                    // Log with processor description
                     logger?.logFrame(
                         noiseMode.name,
                         inRms, inPeak,
@@ -329,8 +341,9 @@ class AudioProcessor(private val context: Context) {
 
                     track.write(outBuffer, 0, n, AudioTrack.WRITE_BLOCKING)
                 }
+                Log.d(tag, "Process thread exiting (gen=$myGen, current=${generation.get()})")
             } catch (t: Throwable) {
-                Log.e(tag, "Playback error: ${t.message}")
+                Log.e(tag, "Playback error (gen=$myGen): ${t.message}")
             }
         }
     }
