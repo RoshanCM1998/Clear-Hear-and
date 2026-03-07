@@ -1,4 +1,4 @@
-## clear-hear-and: Creation Plan and Rationale
+## clear-hear: Creation Plan and Rationale
 
 ### Goals
 - Simple hearing-aid app with Gain and Master Volume controls

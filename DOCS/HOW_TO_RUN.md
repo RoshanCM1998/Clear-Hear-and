@@ -1,4 +1,4 @@
-## How to Run clear-hear-and
+## How to Run clear-hear
 
 ### Prerequisites
 - Android Studio Hedgehog or later
@@ -17,7 +17,7 @@
 
 ### Logs
 - Logs are written to: App external files directory under `logs`
-- Path example: `Android/data/com.clearhearand/files/logs/clear_hear_and_<timestamp>.log`
+- Path example: `Android/data/com.clearhear/files/logs/clear_hear_and_<timestamp>.log`
 - You can pull logs via `Device File Explorer` in Android Studio or via `adb pull`
 
 ### Notes

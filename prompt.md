@@ -1,5 +1,5 @@
 I want to build a simple Android App.
-Let's name it clear-hear-and
+Let's name it clear-hear
 
 Here idea is simple we want to build a hearing aid app. 
 

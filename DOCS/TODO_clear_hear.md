@@ -1,4 +1,4 @@
-# To-Do for clear-hear-and
+# To-Do for clear-hear
 
 1. Initialize minimal Android app project structure
    - Reason: Base scaffolding for app, build, and manifest
@@ -170,7 +170,7 @@
     - Problem: All processor implementations were in single AudioModeProcessor.kt file
     - Solution: Split into separate files with proper folder structure
     - Changes made:
-      * Created new package: com.clearhearand.audio.processors
+      * Created new package: com.clearhear.audio.processors
       * Separated files (C# style):
         - AudioModeProcessor.kt (interface only - 73 lines)
         - OffModeProcessor.kt (OFF implementation - 68 lines)
@@ -225,11 +225,11 @@
         - AudioLogger.kt → audio/logging/AudioLogger.kt
         - IAudioModeProcessor → processors/IAudioModeProcessor.kt
       * Updated all package declarations:
-        - com.clearhearand.ui
-        - com.clearhearand.services
-        - com.clearhearand.audio.dsp
-        - com.clearhearand.audio.logging
-        - com.clearhearand.audio.processors
+        - com.clearhear.ui
+        - com.clearhear.services
+        - com.clearhear.audio.dsp
+        - com.clearhear.audio.logging
+        - com.clearhear.audio.processors
       * Updated all imports in affected files:
         - MainActivity imports AudioForegroundService, NoiseMode
         - AudioForegroundService imports AudioProcessor
@@ -680,7 +680,7 @@
     - User feedback: Want combination of approaches, ability to switch between filters
     - Solution: Strategy Pattern with 4 distinct implementations
     - Changes made:
-      * Created new package: `com.clearhearand.audio.processors.lightmode`
+      * Created new package: `com.clearhear.audio.processors.lightmode`
       * Created ILightModeStrategy.kt (interface):
         - setup(audioSessionId, sampleRate, chunkSize)
         - process(samples: ShortArray)
@@ -692,7 +692,7 @@
         2. **HighPassFilterStrategy**: DC Blocker (20Hz) + High-Pass (80Hz) (consistent, minimal impact)
         3. **AdaptiveGateStrategy**: High-Pass + Adaptive Noise Gate (5ms attack, 100ms release, 200ms hold)
         4. **CustomProfileStrategy**: Analyzes noise_profile.txt, learns threshold (3x avg RMS), adaptive gating
-      * Created DSP components in `com.clearhearand.audio.dsp.lightmode`:
+      * Created DSP components in `com.clearhear.audio.dsp.lightmode`:
         - DcBlocker.kt: 1st order high-pass @ 20Hz (removes DC offset)
         - HighPassFilter80Hz.kt: 2nd order high-pass @ 80Hz (removes rumble)
         - AdaptiveNoiseGate.kt: Time-domain gate with attack/release/hold envelope
