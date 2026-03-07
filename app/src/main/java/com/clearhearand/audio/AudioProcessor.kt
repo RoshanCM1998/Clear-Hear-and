@@ -1,10 +1,7 @@
 package com.clearhearand.audio
 
-import android.bluetooth.BluetoothAdapter
-import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.media.*
-import android.media.AudioDeviceInfo
 import android.util.Log
 import com.clearhearand.audio.dsp.eq.AdditiveEqualizer
 import com.clearhearand.audio.dsp.eq.IEqualizer
@@ -19,9 +16,7 @@ import com.clearhearand.audio.processors.OffModeProcessor
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.abs
-import kotlin.math.max
-import kotlin.math.sqrt
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Noise cancellation modes available to the user.
@@ -43,6 +38,7 @@ class AudioProcessor(private val context: Context) {
     private val tag = "AudioProcessor"
 
     private val isRunning = AtomicBoolean(false)
+    private val generation = AtomicInteger(0)
     private val ioExecutor = Executors.newSingleThreadExecutor()
     private val processExecutor = Executors.newSingleThreadExecutor()
     private val queue = ArrayBlockingQueue<ShortArray>(8)
@@ -55,27 +51,21 @@ class AudioProcessor(private val context: Context) {
     @Volatile private var gainMultiplier: Float = 1.0f
     @Volatile private var volumeMultiplier: Float = 1.0f
 
-    // Preferred audio devices (null = system default)
-    @Volatile private var preferredInputDeviceId: Int? = null
-    @Volatile private var preferredOutputDeviceId: Int? = null
-    @Volatile private var bluetoothScoActive: Boolean = false
+    val deviceManager = AudioDeviceManager(context)
 
-    // Audio format - KEEP at 48kHz and 100ms for original quality
+    // Audio format
     private val sampleRate = 48000
     private val channelIn = AudioFormat.CHANNEL_IN_MONO
     private val channelOut = AudioFormat.CHANNEL_OUT_MONO
     private val encoding = AudioFormat.ENCODING_PCM_16BIT
 
-    // Strategy pattern: Different processor for each mode
     private var currentProcessor: IAudioModeProcessor = OffModeProcessor()
 
     private var logger: AudioLogger? = null
 
-    // 6-band parametric EQ applied after processor, before post-filter
     private var equalizer: IEqualizer? = null
     @Volatile private var eqModeMultiplier: Boolean = false
 
-    // Post-filter: DC Block + Noise Gate applied after volume (catches residual noise)
     @Volatile private var postFilterEnabled: Boolean = false
     private var postDcBlocker: DcBlocker? = null
     private var postNoiseGate: AdaptiveNoiseGate? = null
@@ -89,10 +79,8 @@ class AudioProcessor(private val context: Context) {
 
         logger = AudioLogger(context)
 
-        // Initialize EQ based on current mode
         equalizer = if (eqModeMultiplier) MultiplierEqualizer(sampleRate) else AdditiveEqualizer(sampleRate)
 
-        // Initialize post-filter DSP components
         postDcBlocker = DcBlocker(sampleRate, cutoffFreq = 20f)
         postNoiseGate = AdaptiveNoiseGate(
             sampleRate = sampleRate,
@@ -104,10 +92,7 @@ class AudioProcessor(private val context: Context) {
         )
 
         setupAudio()
-
-        // Create processor for initial mode
         createProcessorForMode(initialMode)
-
         startThreads()
     }
 
@@ -124,10 +109,8 @@ class AudioProcessor(private val context: Context) {
         postDcBlocker = null
         postNoiseGate = null
 
-        // Clean up Bluetooth SCO
-        if (bluetoothScoActive) {
-            val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-            stopBluetoothSco(am)
+        if (deviceManager.bluetoothScoActive) {
+            deviceManager.stopBluetoothSco()
         }
     }
 
@@ -136,20 +119,13 @@ class AudioProcessor(private val context: Context) {
         noiseMode = mode
         if (!isRunning.get()) return
 
-        // Strategy pattern: Switch to different processor
         Log.d(tag, "Switching from $oldMode to $mode")
         createProcessorForMode(mode)
     }
 
-    /**
-     * Create and setup processor for the specified mode
-     * Cleans up old processor first
-     */
     private fun createProcessorForMode(mode: NoiseMode) {
-        // Cleanup old processor
         currentProcessor.cleanup()
 
-        // Create new processor based on mode
         currentProcessor = when (mode) {
             NoiseMode.OFF -> {
                 Log.d(tag, "Created OffModeProcessor")
@@ -165,7 +141,6 @@ class AudioProcessor(private val context: Context) {
             }
         }
 
-        // Setup new processor
         currentProcessor.setup(audioRecord, sampleRate)
         Log.d(tag, "Active processor: ${currentProcessor.getDescription()}")
     }
@@ -190,122 +165,70 @@ class AudioProcessor(private val context: Context) {
         Log.d(tag, "EQ mode switched to ${if (isMultiplier) "Multiplier" else "Additive"}")
     }
 
+    // ── Device Selection ──
+
     fun setInputDevice(deviceId: Int?) {
-        val oldId = preferredInputDeviceId
-        preferredInputDeviceId = deviceId
-        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        val deviceInfo = if (deviceId != null) {
-            am.getDevices(AudioManager.GET_DEVICES_INPUTS).firstOrNull { it.id == deviceId }
-        } else null
+        deviceManager.setInputDeviceId(deviceId)
 
-        val isBluetooth = deviceInfo != null && isBluetoothDevice(deviceInfo.type)
-        val wasBluetooth = bluetoothScoActive
-        Log.d(tag, "setInputDevice: id=$deviceId, name=${deviceInfo?.productName}, type=${deviceInfo?.type}, isBT=$isBluetooth, wasBT=$wasBluetooth")
-
-        // If BT state changed while running, we need to restart the audio pipeline
-        // because AudioSource (VOICE_COMMUNICATION vs VOICE_RECOGNITION) must match
-        if (isRunning.get() && isBluetooth != wasBluetooth) {
-            Log.d(tag, "BT state changed while running — restarting audio pipeline")
+        // Always restart the pipeline when changing input device while running.
+        // setPreferredDevice() alone is unreliable — recreating AudioRecord is the
+        // only way to guarantee the new device is actually used.
+        if (isRunning.get()) {
+            Log.d(tag, "Input device changed while running — restarting audio pipeline")
             restartAudioPipeline()
-            return
         }
+    }
 
-        if (isBluetooth && !bluetoothScoActive) {
-            startBluetoothSco(am)
-        } else if (!isBluetooth && bluetoothScoActive) {
-            stopBluetoothSco(am)
+    fun setOutputDevice(deviceId: Int?) {
+        deviceManager.setOutputDeviceId(deviceId)
+
+        // Output device changes work reliably with setPreferredDevice()
+        if (isRunning.get()) {
+            deviceManager.applyOutputDevice(audioTrack)
         }
-
-        val result = audioRecord?.setPreferredDevice(deviceInfo)
-        Log.d(tag, "setPreferredDevice(input) result=$result")
-
-        val actualDevice = audioRecord?.routedDevice
-        Log.d(tag, "Input routed to: ${actualDevice?.productName} (type=${actualDevice?.type}, id=${actualDevice?.id})")
     }
 
     private fun restartAudioPipeline() {
         if (!isRunning.get()) return
         Log.d(tag, "Restarting audio pipeline for device change")
 
-        // Stop current audio
+        // Bump generation so old IO/process threads exit their loops
+        val newGen = generation.incrementAndGet()
+        Log.d(tag, "Pipeline generation bumped to $newGen")
+
+        // Stop current audio hardware
         try { audioRecord?.stop() } catch (_: Throwable) {}
         try { audioTrack?.stop() } catch (_: Throwable) {}
         currentProcessor.cleanup()
         audioRecord?.release(); audioRecord = null
         audioTrack?.release(); audioTrack = null
+        // Unblock the process thread if it's stuck on queue.take()
         queue.clear()
+        queue.offer(ShortArray(0)) // sentinel to wake up queue.take()
 
-        if (bluetoothScoActive) {
-            val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-            stopBluetoothSco(am)
+        if (deviceManager.bluetoothScoActive) {
+            deviceManager.stopBluetoothSco()
         }
+
+        // Let old threads exit before reusing the executors
+        Thread.sleep(150)
 
         // Recreate audio with new settings
         setupAudio()
         createProcessorForMode(noiseMode)
         startThreads()
-        Log.d(tag, "Audio pipeline restarted")
+        Log.d(tag, "Audio pipeline restarted (gen=$newGen)")
     }
 
-    fun setOutputDevice(deviceId: Int?) {
-        preferredOutputDeviceId = deviceId
-        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        val deviceInfo = if (deviceId != null) {
-            am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).firstOrNull { it.id == deviceId }
-        } else null
-
-        Log.d(tag, "setOutputDevice: id=$deviceId, name=${deviceInfo?.productName}, type=${deviceInfo?.type}")
-
-        val result = audioTrack?.setPreferredDevice(deviceInfo)
-        Log.d(tag, "setPreferredDevice(output) result=$result")
-
-        val actualDevice = audioTrack?.routedDevice
-        Log.d(tag, "Output routed to: ${actualDevice?.productName} (type=${actualDevice?.type}, id=${actualDevice?.id})")
-    }
-
-    private fun isBluetoothDevice(type: Int): Boolean {
-        return type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
-               type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
-               (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S &&
-                (type == AudioDeviceInfo.TYPE_BLE_HEADSET || type == AudioDeviceInfo.TYPE_BLE_SPEAKER))
-    }
-
-    @Suppress("DEPRECATION")
-    private fun startBluetoothSco(am: AudioManager) {
-        if (bluetoothScoActive) return
-        Log.d(tag, "Starting Bluetooth SCO, current audio mode=${am.mode}")
-        am.mode = AudioManager.MODE_IN_COMMUNICATION
-        am.startBluetoothSco()
-        am.isBluetoothScoOn = true
-        bluetoothScoActive = true
-        Log.d(tag, "Bluetooth SCO started, mode=${am.mode}, scoOn=${am.isBluetoothScoOn}")
-    }
-
-    @Suppress("DEPRECATION")
-    private fun stopBluetoothSco(am: AudioManager) {
-        if (!bluetoothScoActive) return
-        Log.d(tag, "Stopping Bluetooth SCO")
-        am.isBluetoothScoOn = false
-        am.stopBluetoothSco()
-        am.mode = AudioManager.MODE_NORMAL
-        bluetoothScoActive = false
-        Log.d(tag, "Bluetooth SCO stopped, mode=${am.mode}")
-    }
+    // ── Other Settings ──
 
     fun setPostFilterEnabled(enabled: Boolean) {
         postFilterEnabled = enabled
-        // Reset filter state when toggling to avoid artifacts
         postDcBlocker?.reset()
         postNoiseGate?.reset()
         Log.d(tag, "Post-filter ${if (enabled) "enabled" else "disabled"}")
     }
 
-    /**
-     * Set the filtering strategy for LIGHT mode.
-     * Only applies if currently in LIGHT mode.
-     *
-     * @param strategyKey Strategy identifier: "android", "highpass", "adaptive", or "custom"
-     */
     fun setLightModeStrategy(strategyKey: String) {
         if (noiseMode != NoiseMode.LIGHT) {
             Log.w(tag, "Cannot set strategy - not in LIGHT mode")
@@ -319,114 +242,30 @@ class AudioProcessor(private val context: Context) {
         }
     }
 
+    // ── Audio Setup ──
+
     private fun setupAudio() {
-        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-
-        // Check if we need Bluetooth SCO for input
-        val inputDeviceInfo = preferredInputDeviceId?.let { id ->
-            am.getDevices(AudioManager.GET_DEVICES_INPUTS).firstOrNull { it.id == id }
-        }
-        val needsBtSco = inputDeviceInfo != null && isBluetoothDevice(inputDeviceInfo.type)
-
-        if (needsBtSco) {
-            startBluetoothSco(am)
-        }
-
-        Log.d(tag, "setupAudio: sampleRate=$sampleRate, inputDevice=${inputDeviceInfo?.productName ?: "Default"}, needsBtSco=$needsBtSco")
-
-        // Log available devices for diagnostics
-        val inputDevices = am.getDevices(AudioManager.GET_DEVICES_INPUTS)
-        val outputDevices = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-        Log.d(tag, "Available input devices: ${inputDevices.joinToString { "${it.productName}(id=${it.id},type=${it.type})" }}")
-        Log.d(tag, "Available output devices: ${outputDevices.joinToString { "${it.productName}(id=${it.id},type=${it.type})" }}")
-
-        val minRec = AudioRecord.getMinBufferSize(sampleRate, channelIn, encoding)
-        val minPlay = AudioTrack.getMinBufferSize(sampleRate, channelOut, encoding)
-        val chunkMs = 100
-        val samplesPerChunk = (sampleRate * chunkMs) / 1000
-        val bytesPerSample = 2
-        val recBufferSize = max(minRec, samplesPerChunk * bytesPerSample)
-        val playBufferSize = max(minPlay, samplesPerChunk * bytesPerSample)
-
-        Log.d(tag, "Buffer sizes: minRec=$minRec, recBuffer=$recBufferSize, minPlay=$minPlay, playBuffer=$playBufferSize")
-
-        // Use VOICE_COMMUNICATION for Bluetooth SCO, VOICE_RECOGNITION otherwise
-        val audioSource = if (needsBtSco) {
-            MediaRecorder.AudioSource.VOICE_COMMUNICATION
-        } else {
-            MediaRecorder.AudioSource.VOICE_RECOGNITION
-        }
-        Log.d(tag, "AudioSource: ${if (needsBtSco) "VOICE_COMMUNICATION" else "VOICE_RECOGNITION"}")
-
-        audioRecord = AudioRecord.Builder()
-            .setAudioSource(audioSource)
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setSampleRate(sampleRate)
-                    .setEncoding(encoding)
-                    .setChannelMask(channelIn)
-                    .build()
-            )
-            .setBufferSizeInBytes(recBufferSize)
-            .build()
-
-        Log.d(tag, "AudioRecord state: ${audioRecord?.state}, sessionId=${audioRecord?.audioSessionId}")
-
-        // Use VOICE_COMMUNICATION usage when BT SCO is active for consistent routing
-        val audioUsage = if (needsBtSco) {
-            AudioAttributes.USAGE_VOICE_COMMUNICATION
-        } else {
-            AudioAttributes.USAGE_MEDIA
-        }
-
-        audioTrack = AudioTrack.Builder()
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(audioUsage)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build()
-            )
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setSampleRate(sampleRate)
-                    .setEncoding(encoding)
-                    .setChannelMask(channelOut)
-                    .build()
-            )
-            .setTransferMode(AudioTrack.MODE_STREAM)
-            .setBufferSizeInBytes(playBufferSize)
-            .build()
-
-        Log.d(tag, "AudioTrack state: ${audioTrack?.state}")
-
-        // Apply preferred devices
-        preferredInputDeviceId?.let { id ->
-            val dev = am.getDevices(AudioManager.GET_DEVICES_INPUTS).firstOrNull { it.id == id }
-            val result = audioRecord?.setPreferredDevice(dev)
-            Log.d(tag, "setPreferredDevice(input): dev=${dev?.productName}, result=$result")
-        }
-        preferredOutputDeviceId?.let { id ->
-            val dev = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).firstOrNull { it.id == id }
-            val result = audioTrack?.setPreferredDevice(dev)
-            Log.d(tag, "setPreferredDevice(output): dev=${dev?.productName}, result=$result")
-        }
+        val pair = deviceManager.createAudioPair(sampleRate, channelIn, channelOut, encoding)
+        audioRecord = pair.record
+        audioTrack = pair.track
 
         audioTrack?.play()
-
-        // Log actual routing
-        Log.d(tag, "After start - input routed to: ${audioRecord?.routedDevice?.productName} (type=${audioRecord?.routedDevice?.type})")
-        Log.d(tag, "After start - output routed to: ${audioTrack?.routedDevice?.productName} (type=${audioTrack?.routedDevice?.type})")
+        deviceManager.logRoutedDevices(audioRecord, audioTrack)
     }
 
+    // ── Processing Threads ──
 
     private fun startThreads() {
         val rec = audioRecord ?: return
+        val myGen = generation.get()
+        Log.d(tag, "startThreads: gen=$myGen")
+
         ioExecutor.execute {
             try {
                 rec.startRecording()
                 val samplesPerChunk = (sampleRate * 100) / 1000
                 val buffer = ShortArray(samplesPerChunk)
-                while (isRunning.get()) {
+                while (isRunning.get() && generation.get() == myGen) {
                     val read = rec.read(buffer, 0, buffer.size)
                     if (read > 0) {
                         val copy = ShortArray(read)
@@ -436,8 +275,9 @@ class AudioProcessor(private val context: Context) {
                         }
                     }
                 }
+                Log.d(tag, "IO thread exiting (gen=$myGen, current=${generation.get()})")
             } catch (t: Throwable) {
-                Log.e(tag, "Recorder error: ${t.message}")
+                Log.e(tag, "Recorder error (gen=$myGen): ${t.message}")
             }
         }
 
@@ -445,56 +285,51 @@ class AudioProcessor(private val context: Context) {
             try {
                 val track = audioTrack ?: return@execute
                 val outBuffer = ShortArray((sampleRate * 100) / 1000)
-                while (isRunning.get()) {
+                while (isRunning.get() && generation.get() == myGen) {
                     val inChunk = queue.take()
+                    if (inChunk.isEmpty()) {
+                        Log.d(tag, "Process thread got sentinel, exiting (gen=$myGen)")
+                        break
+                    }
                     val n = inChunk.size
 
                     val gain = gainMultiplier
                     val volume = volumeMultiplier
                     val processor = currentProcessor
 
-                    // Calculate input levels for logging
                     val inRms = calcRms(inChunk)
                     val inPeak = calcPeak(inChunk)
 
-                    // Main processing: Gain → Filter → Volume (handled by each processor)
                     processor.process(inChunk, outBuffer, gain, volume)
 
-                    // EQ applied on cleaned signal — preserves all frequency shaping
                     val eq = equalizer
                     if (eq != null && !eq.isFlat()) {
                         eq.process(outBuffer)
                     }
 
-                    // Post-filter: DC Block + Noise Gate (catches volume-amplified residual)
                     if (postFilterEnabled) {
                         postDcBlocker?.process(outBuffer)
                         postNoiseGate?.process(outBuffer)
                     }
 
-                    // Calculate output levels for logging
                     val outRms = calcRms(outBuffer)
                     val outPeak = calcPeak(outBuffer)
 
-                    // Get post-filter metrics and DFN diagnostics
                     val afterFilterRms: Float
                     val afterFilterPeak: Float
                     val flags: String
+                    val routingFlags = deviceManager.getRoutingFlags(audioRecord, audioTrack)
+
                     if (processor is ExtremeModeProcessor) {
                         afterFilterRms = processor.lastFilteredRms
                         afterFilterPeak = processor.lastFilteredPeak
-                        val inDev = audioRecord?.routedDevice
-                        val outDev = audioTrack?.routedDevice
-                        flags = "frameLen=${processor.rawFrameLength};snr=${processor.lastSnr};postFilter=$postFilterEnabled;inDev=${inDev?.productName}(${inDev?.type});outDev=${outDev?.productName}(${outDev?.type});btSco=$bluetoothScoActive"
+                        flags = "frameLen=${processor.rawFrameLength};snr=${processor.lastSnr};postFilter=$postFilterEnabled;$routingFlags"
                     } else {
                         afterFilterRms = inRms * gain
                         afterFilterPeak = inPeak * gain
-                        val inDev = audioRecord?.routedDevice
-                        val outDev = audioTrack?.routedDevice
-                        flags = "postFilter=$postFilterEnabled;inDev=${inDev?.productName}(${inDev?.type});outDev=${outDev?.productName}(${outDev?.type});btSco=$bluetoothScoActive"
+                        flags = "postFilter=$postFilterEnabled;$routingFlags"
                     }
 
-                    // Log with processor description
                     logger?.logFrame(
                         noiseMode.name,
                         inRms, inPeak,
@@ -506,8 +341,9 @@ class AudioProcessor(private val context: Context) {
 
                     track.write(outBuffer, 0, n, AudioTrack.WRITE_BLOCKING)
                 }
+                Log.d(tag, "Process thread exiting (gen=$myGen, current=${generation.get()})")
             } catch (t: Throwable) {
-                Log.e(tag, "Playback error: ${t.message}")
+                Log.e(tag, "Playback error (gen=$myGen): ${t.message}")
             }
         }
     }

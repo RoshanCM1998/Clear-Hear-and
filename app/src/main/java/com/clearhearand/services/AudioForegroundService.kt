@@ -41,6 +41,9 @@ class AudioForegroundService : Service() {
         const val EXTRA_INPUT_DEVICE_ID = "extra_input_device_id"
         const val EXTRA_OUTPUT_DEVICE_ID = "extra_output_device_id"
 
+        var isRunning = false
+            private set
+
         private const val NOTIF_CHANNEL_ID = "clear_hear_and_channel"
         private const val NOTIF_ID = 101
         private const val TAG = "ClearHearAnd"
@@ -79,6 +82,7 @@ class AudioForegroundService : Service() {
                 if (eqBands != null && eqBands.size == 6) {
                     processor?.setEqBands(eqBands)
                 }
+                isRunning = true
             }
             ACTION_SET_MODE -> {
                 val modeStr = intent.getStringExtra(EXTRA_MODE) ?: return START_STICKY
@@ -125,6 +129,7 @@ class AudioForegroundService : Service() {
                 processor?.setOutputDevice(if (deviceId >= 0) deviceId else null)
             }
             ACTION_STOP -> {
+                isRunning = false
                 processor?.stop()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
@@ -136,6 +141,7 @@ class AudioForegroundService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        isRunning = false
         processor?.stop()
         try { logger.close() } catch (_: Throwable) {}
     }

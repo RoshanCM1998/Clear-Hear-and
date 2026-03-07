@@ -10,6 +10,7 @@ import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.media.AudioDeviceCallback
+import com.clearhearand.audio.AudioDeviceManager
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.net.Uri
@@ -28,6 +29,7 @@ import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
 import android.graphics.Rect
 import android.widget.*
+import androidx.appcompat.app.AlertDialog
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -978,8 +980,19 @@ class MainActivity : AppCompatActivity() {
         setContentView(root)
     }
 
+    private fun updateStartButtonState() {
+        if (isRunning) return // Don't disable while running — let user stop
+        val hasOutput = hasExternalOutputDevice()
+        // Don't set isEnabled=false — it blocks click events including the toast
+        startStopFab.alpha = if (hasOutput) 1f else 0.5f
+    }
+
     private fun onStartStopClicked() {
         if (!isRunning) {
+            if (!hasExternalOutputDevice()) {
+                Toast.makeText(this, "Connect Wired headphones or a Bluetooth device to start", Toast.LENGTH_SHORT).show()
+                return
+            }
             if (!hasMicPermission()) {
                 requestNeededPermissions()
                 return
@@ -1016,6 +1029,20 @@ class MainActivity : AppCompatActivity() {
             startStopFab.text = "Start"
             startStopFab.backgroundTintList = ColorStateList.valueOf(startGreen)
         }
+    }
+
+    private fun restartAudioProcessing() {
+        // Stop
+        val stopIntent = Intent(this, AudioForegroundService::class.java).apply {
+            action = AudioForegroundService.ACTION_STOP
+        }
+        startService(stopIntent)
+        isRunning = false
+
+        // Re-start after a brief delay to let teardown complete
+        Handler(Looper.getMainLooper()).postDelayed({
+            onStartStopClicked()
+        }, 300)
     }
 
     private fun autoApplyParams() {
@@ -1430,59 +1457,263 @@ class MainActivity : AppCompatActivity() {
 
     private fun showInputDevicePopup(anchor: View) {
         val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        val devices = am.getDevices(AudioManager.GET_DEVICES_INPUTS)
-        val popup = PopupMenu(this, anchor, Gravity.TOP)
-
-        popup.menu.add(0, -1, 0, "Default (System)")
-        for (device in devices) {
-            popup.menu.add(0, device.id, 0, getDeviceDisplayName(device))
-        }
-
-        // Check current selection
-        popup.menu.findItem(selectedInputDeviceId)?.isChecked = true
-
-        popup.setOnMenuItemClickListener { item ->
-            selectedInputDeviceId = item.itemId
+        val devices = getRelevantDevices(am.getDevices(AudioManager.GET_DEVICES_INPUTS), isInput = true).toTypedArray()
+        showDevicePickerDialog(
+            title = "Select Input Device",
+            devices = devices,
+            selectedDeviceId = selectedInputDeviceId,
+            isInput = true,
+            defaultIconRes = R.drawable.ic_mic
+        ) { deviceId ->
+            selectedInputDeviceId = deviceId
             prefs.edit().putInt("selected_input_device", selectedInputDeviceId).apply()
             updateMicButtonIcon()
-            if (isRunning) {
-                val intent = Intent(this, AudioForegroundService::class.java).apply {
-                    action = AudioForegroundService.ACTION_SET_INPUT_DEVICE
-                    putExtra(AudioForegroundService.EXTRA_DEVICE_ID, selectedInputDeviceId)
+
+            // Auto-switch output to matching BT SCO when BT input is selected
+            val inputDev = am.getDevices(AudioManager.GET_DEVICES_INPUTS).firstOrNull { it.id == deviceId }
+            if (inputDev != null && AudioDeviceManager.isBluetoothDevice(inputDev.type)) {
+                val matchingScoOutput = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).firstOrNull {
+                    it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO &&
+                    it.productName == inputDev.productName
                 }
-                startService(intent)
+                if (matchingScoOutput != null) {
+                    selectedOutputDeviceId = matchingScoOutput.id
+                    prefs.edit().putInt("selected_output_device", selectedOutputDeviceId).apply()
+                    updateSpeakerButtonIcon()
+                }
             }
-            true
+
+            if (isRunning) restartAudioProcessing()
         }
-        popup.show()
     }
 
     private fun showOutputDevicePopup(anchor: View) {
         val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        val devices = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-        val popup = PopupMenu(this, anchor, Gravity.TOP)
-
-        popup.menu.add(0, -1, 0, "Default (System)")
-        for (device in devices) {
-            popup.menu.add(0, device.id, 0, getDeviceDisplayName(device))
-        }
-
-        popup.menu.findItem(selectedOutputDeviceId)?.isChecked = true
-
-        popup.setOnMenuItemClickListener { item ->
-            selectedOutputDeviceId = item.itemId
+        val devices = getRelevantDevices(am.getDevices(AudioManager.GET_DEVICES_OUTPUTS), isInput = false).toTypedArray()
+        showDevicePickerDialog(
+            title = "Select Output Device",
+            devices = devices,
+            selectedDeviceId = selectedOutputDeviceId,
+            isInput = false,
+            defaultIconRes = R.drawable.ic_volume_up
+        ) { deviceId ->
+            selectedOutputDeviceId = deviceId
             prefs.edit().putInt("selected_output_device", selectedOutputDeviceId).apply()
             updateSpeakerButtonIcon()
-            if (isRunning) {
-                val intent = Intent(this, AudioForegroundService::class.java).apply {
-                    action = AudioForegroundService.ACTION_SET_OUTPUT_DEVICE
-                    putExtra(AudioForegroundService.EXTRA_DEVICE_ID, selectedOutputDeviceId)
-                }
-                startService(intent)
-            }
-            true
+            if (isRunning) restartAudioProcessing()
         }
-        popup.show()
+    }
+
+    private fun showDevicePickerDialog(
+        title: String,
+        devices: Array<AudioDeviceInfo>,
+        selectedDeviceId: Int,
+        isInput: Boolean,
+        defaultIconRes: Int,
+        onDeviceSelected: (Int) -> Unit
+    ) {
+        val density = resources.displayMetrics.density
+        fun dp(value: Int) = (value * density + 0.5f).toInt()
+
+        val dialogBuilder = AlertDialog.Builder(this)
+        var dialog: AlertDialog? = null
+
+        // Title
+        val titleView = TextView(this).apply {
+            text = title
+            setTextColor(accentTeal)
+            textSize = 18f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            setPadding(dp(20), dp(20), dp(20), dp(12))
+        }
+
+        // Scrollable list container
+        val listLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), 0, dp(12), dp(12))
+        }
+
+        // Helper to build a row
+        fun buildRow(
+            deviceId: Int,
+            iconRes: Int,
+            name: String,
+            subtitle: String,
+            isSelected: Boolean
+        ): View {
+            val cardBg = GradientDrawable().apply {
+                setColor(surfaceCard)
+                cornerRadius = dp(12).toFloat()
+                if (isSelected) {
+                    setStroke(dp(2), accentTeal)
+                }
+            }
+
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = cardBg
+                setPadding(dp(14), dp(12), dp(14), dp(12))
+                val rowParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+                rowParams.bottomMargin = dp(8)
+                layoutParams = rowParams
+            }
+
+            // Icon
+            val icon = ImageView(this).apply {
+                setImageResource(iconRes)
+                imageTintList = ColorStateList.valueOf(accentTeal)
+                val iconParams = LinearLayout.LayoutParams(dp(28), dp(28))
+                iconParams.marginEnd = dp(14)
+                layoutParams = iconParams
+            }
+            row.addView(icon)
+
+            // Text column
+            val textCol = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            val nameText = TextView(this).apply {
+                text = name
+                setTextColor(textPrimary)
+                textSize = 16f
+            }
+            textCol.addView(nameText)
+            if (subtitle.isNotEmpty()) {
+                val subText = TextView(this).apply {
+                    text = subtitle
+                    setTextColor(textSecondary)
+                    textSize = 12f
+                }
+                textCol.addView(subText)
+            }
+            row.addView(textCol)
+
+            // Radio indicator
+            val radioSize = dp(20)
+            val radioView = View(this).apply {
+                val shape = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    if (isSelected) {
+                        setColor(accentTeal)
+                        setStroke(dp(2), accentTeal)
+                    } else {
+                        setColor(Color.TRANSPARENT)
+                        setStroke(dp(2), textSecondary)
+                    }
+                    setSize(radioSize, radioSize)
+                }
+                background = shape
+                val radioParams = LinearLayout.LayoutParams(radioSize, radioSize)
+                radioParams.marginStart = dp(12)
+                layoutParams = radioParams
+            }
+            row.addView(radioView)
+
+            row.setOnClickListener {
+                onDeviceSelected(deviceId)
+                dialog?.dismiss()
+            }
+
+            return row
+        }
+
+        // Default row
+        listLayout.addView(
+            buildRow(
+                deviceId = -1,
+                iconRes = defaultIconRes,
+                name = "Default (System)",
+                subtitle = "",
+                isSelected = selectedDeviceId == -1
+            )
+        )
+
+        // Device rows
+        for (device in devices) {
+            val name = device.productName?.toString()?.takeIf { it.isNotBlank() } ?: ""
+            val typeName = getDeviceTypeName(device.type)
+            val displayName = if (name.isNotEmpty() && name != typeName) name else typeName
+            val subtitle = if (name.isNotEmpty() && name != typeName) typeName else ""
+
+            listLayout.addView(
+                buildRow(
+                    deviceId = device.id,
+                    iconRes = getIconResForDeviceType(device.type, isInput),
+                    name = displayName,
+                    subtitle = subtitle,
+                    isSelected = selectedDeviceId == device.id
+                )
+            )
+        }
+
+        val scrollView = ScrollView(this).apply {
+            addView(listLayout)
+        }
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(surfaceDark)
+            addView(titleView)
+            addView(scrollView)
+        }
+
+        dialog = dialogBuilder
+            .setView(container)
+            .create()
+
+        dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
+        dialog.show()
+    }
+
+    private fun getRelevantDevices(devices: Array<AudioDeviceInfo>, isInput: Boolean): List<AudioDeviceInfo> {
+        val allowedTypes = if (isInput) {
+            mutableSetOf(
+                AudioDeviceInfo.TYPE_BUILTIN_MIC,
+                AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+                AudioDeviceInfo.TYPE_WIRED_HEADSET,
+                AudioDeviceInfo.TYPE_USB_DEVICE,
+                AudioDeviceInfo.TYPE_USB_ACCESSORY,
+                AudioDeviceInfo.TYPE_USB_HEADSET
+            ).apply {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    add(AudioDeviceInfo.TYPE_BLE_HEADSET)
+                }
+            }
+        } else {
+            mutableSetOf(
+                AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+                AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+                AudioDeviceInfo.TYPE_WIRED_HEADSET,
+                AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+                AudioDeviceInfo.TYPE_USB_DEVICE,
+                AudioDeviceInfo.TYPE_USB_ACCESSORY,
+                AudioDeviceInfo.TYPE_USB_HEADSET,
+                AudioDeviceInfo.TYPE_HDMI
+            ).apply {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    add(AudioDeviceInfo.TYPE_BLE_HEADSET)
+                    add(AudioDeviceInfo.TYPE_BLE_SPEAKER)
+                }
+            }
+        }
+
+        val seen = mutableSetOf<String>()
+        return devices.filter { it.type in allowedTypes }
+            .filter { device ->
+                val key = "${device.productName}_${device.type}"
+                seen.add(key)
+            }
+    }
+
+    private fun hasExternalOutputDevice(): Boolean {
+        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val devices = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+        return getRelevantDevices(devices, isInput = false).isNotEmpty()
     }
 
     private fun getDeviceDisplayName(device: AudioDeviceInfo): String {
@@ -1577,12 +1808,14 @@ class MainActivity : AppCompatActivity() {
             override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) {
                 updateMicButtonIcon()
                 updateSpeakerButtonIcon()
+                updateStartButtonState()
             }
 
             override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) {
                 // Check if selected devices were removed
                 updateMicButtonIcon()
                 updateSpeakerButtonIcon()
+                updateStartButtonState()
                 // If running and selected device was removed, notify service to fall back
                 if (isRunning) {
                     if (selectedInputDeviceId < 0) {
@@ -1613,10 +1846,17 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        // Sync running state with service (fixes Start/Stop button after backgrounding)
+        val serviceRunning = AudioForegroundService.isRunning
+        isRunning = serviceRunning
+        startStopFab.text = if (serviceRunning) "Stop" else "Start"
+        startStopFab.backgroundTintList = ColorStateList.valueOf(if (serviceRunning) stopRed else startGreen)
+
         registerAudioDeviceCallback()
-        // Refresh icons in case devices changed while paused
+        // Refresh icons and button state in case devices changed while paused
         updateMicButtonIcon()
         updateSpeakerButtonIcon()
+        updateStartButtonState()
     }
 
     override fun onPause() {
